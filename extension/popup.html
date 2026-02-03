@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="container">
+    <h1>Context Porter</h1>
+    
+    <div id="status" class="status"></div>
+    
+    <div class="section">
+      <h2>Export</h2>
+      <button id="exportBtn" class="btn btn-primary">
+        Export Current Chat
+      </button>
+      <p class="hint">Saves conversation as .llmchat file</p>
+    </div>
+    
+    <div class="section">
+      <h2>Import</h2>
+      <input type="file" id="fileInput" accept=".llmchat" style="display:none">
+      <button id="importBtn" class="btn btn-secondary">
+        Convert to Markdown
+      </button>
+      <p class="hint">Upload .llmchat file to convert</p>
+    </div>
+    
+    <div class="section">
+      <div class="info">
+        <span id="platform">Unknown platform</span>
+        <span id="messageCount">-</span>
+      </div>
+    </div>
+  </div>
+  
+  <script src="popup.js"></script>
+</body>
+</html>
