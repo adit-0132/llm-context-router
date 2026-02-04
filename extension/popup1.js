@@ -56,10 +56,10 @@ exportBtn.addEventListener('click', () => {
         return;
       }
 
-      // Download to Downloads/context-porter/ directory
+      // Download using blob URL + anchor tag instead of chrome.downloads
       const blob = new Blob([JSON.stringify(response.data, null, 2)], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
-      const filename = `context-porter/${response.platform}_${response.conversationId || Date.now()}.llmchat`;
+      const filename = `${response.platform}_${response.conversationId || Date.now()}.llmchat`;
 
       // Create a temporary anchor and click it
       const a = document.createElement('a');
@@ -102,10 +102,10 @@ fileInput.addEventListener('change', async (e) => {
 
     const markdown = convertToMarkdown(llmchatData);
 
-    // Download markdown to Downloads/context-porter/
+    // Download markdown
     const blob = new Blob([markdown], { type: 'text/markdown' });
     const url = URL.createObjectURL(blob);
-    const filename = `context-porter/${file.name.replace('.llmchat', '.md')}`;
+    const filename = file.name.replace('.llmchat', '.md');
 
     const a = document.createElement('a');
     a.href = url;

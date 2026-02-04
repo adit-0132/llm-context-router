@@ -1,49 +1,6 @@
 // ChatGPT content script - extracts conversation data
 
-// Step 1: Inject interceptor into page context to capture auth token
-// Content scripts run in isolated context, so we need to inject into the actual page
-const interceptor = document.createElement('script');
-interceptor.textContent = `
-  (function() {
-    window.__CHATGPT_AUTH_TOKEN__ = null;
-
-    const originalFetch = window.fetch;
-    window.fetch = async function(...args) {
-      const response = await originalFetch.apply(this, args);
-
-      // Grab auth token from any request that has it
-      const options = args[1] || {};
-      const headers = options.headers || {};
-
-      if (headers['authorization']) {
-        window.__CHATGPT_AUTH_TOKEN__ = headers['authorization'];
-      }
-
-      // Also check if it's a Request object
-      if (args[0] instanceof Request && args[0].headers.get('authorization')) {
-        window.__CHATGPT_AUTH_TOKEN__ = args[0].headers.get('authorization');
-      }
-
-      return response;
-    };
-
-    // Also intercept XMLHttpRequest just in case
-    const originalOpen = XMLHttpRequest.prototype.open;
-    const originalSetHeader = XMLHttpRequest.prototype.setRequestHeader;
-
-    XMLHttpRequest.prototype.setRequestHeader = function(name, value) {
-      if (name.toLowerCase() === 'authorization') {
-        window.__CHATGPT_AUTH_TOKEN__ = value;
-      }
-      return originalSetHeader.apply(this, arguments);
-    };
-
-    console.log('[ContextPorter] Interceptor installed. Waiting for auth token...');
-  })();
-`;
-document.head.appendChild(interceptor);
-
-// Step 2: Listen for export requests from popup
+// Listen for export requests
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === 'export') {
     exportChatGPTConversation()
@@ -52,31 +9,6 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return true;
   }
 });
-
-// Step 3: Read the token from the page context via another injected script
-async function getAuthToken() {
-  return new Promise((resolve) => {
-    const reader = document.createElement('script');
-    reader.textContent = `
-      (function() {
-        const event = new CustomEvent('__CP_AUTH_TOKEN__', {
-          detail: { token: window.__CHATGPT_AUTH_TOKEN__ }
-        });
-        document.dispatchEvent(event);
-      })();
-    `;
-    
-    // Listen for the token
-    const handler = (e) => {
-      document.removeEventListener('__CP_AUTH_TOKEN__', handler);
-      resolve(e.detail.token);
-    };
-    document.addEventListener('__CP_AUTH_TOKEN__', handler);
-
-    document.head.appendChild(reader);
-    document.head.removeChild(reader);
-  });
-}
 
 async function exportChatGPTConversation() {
   try {
@@ -87,18 +19,14 @@ async function exportChatGPTConversation() {
 
     console.log('[ContextPorter] Chat ID:', chatId);
 
-    // Try to get the auth token
-    const authToken = await getAuthToken();
-    console.log('[ContextPorter] Auth token found:', !!authToken);
+    // Get auth token from background script (it intercepts API calls)
+    const authToken = await new Promise((resolve) => {
+      chrome.runtime.sendMessage({ action: 'getChatGPTAuth' }, (response) => {
+        resolve(response?.token || null);
+      });
+    });
 
-    if (!authToken) {
-      // Token not captured yet - trigger a page action to generate one
-      // Ask user to send a message or wait
-      return { 
-        success: false, 
-        error: 'Auth token not captured yet. Send a message in the chat first, then try again.' 
-      };
-    }
+    console.log('[ContextPorter] Auth token found:', !!authToken);
 
     const url = `https://chatgpt.com/backend-api/conversation/${chatId}`;
 
@@ -116,11 +44,17 @@ async function exportChatGPTConversation() {
     if (!response.ok) {
       const errorText = await response.text();
       console.error('[ContextPorter] Error:', errorText);
+      
+      // If 401, token might be invalid
+      if (response.status === 401) {
+        return { success: false, error: 'Auth token expired. Refresh the page and try again.' };
+      }
+      
       return { success: false, error: `API returned ${response.status}` };
     }
 
     const rawData = await response.json();
-    console.log('[ContextPorter] Raw data received, mapping keys:', Object.keys(rawData.mapping || {}).length);
+    console.log('[ContextPorter] Raw data received');
 
     const llmchatData = convertChatGPTToLLMChat(rawData);
     console.log('[ContextPorter] Converted, messages:', llmchatData.messages.length);

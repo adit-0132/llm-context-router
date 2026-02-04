@@ -5,8 +5,12 @@
   "description": "Export and import LLM conversations between ChatGPT and Claude",
   "permissions": [
     "activeTab",
-    "storage"
+    "storage",
+    "webRequest"
   ],
+  "background": {
+    "service_worker": "background.js"
+  },
   "host_permissions": [
     "https://chatgpt.com/*",
     "https://chat.openai.com/*",
