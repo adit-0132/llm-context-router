@@ -2,7 +2,6 @@
  * Structural Segmenter
  *
  * Splits raw .llmchat messages into typed semantic segments.
- * Each segment becomes a node in the weighted semantic graph.
  *
  * Segment types:
  *   - code:      fenced code blocks (triple backticks) — treated as atomic
@@ -11,6 +10,10 @@
  *   - meta:      greetings, thanks, pleasantries — low value
  *   - list:      bullet/numbered list items
  *   - reasoning: default — explanations, analysis, discussion
+ *
+ * Each segment also carries:
+ *   - isArtifact:   true for code, decisions, structured lists (the "deliverables")
+ *   - codeLanguage: for code segments, the language identifier (e.g., 'javascript')
  */
 
 import { STOPWORDS } from './stopwords.js';
@@ -112,6 +115,8 @@ function classifySegment(text) {
  * @property {string}  messageId          - UUID of the parent message
  * @property {'user'|'assistant'} role
  * @property {'code'|'reasoning'|'decision'|'question'|'meta'|'list'} type
+ * @property {boolean} isArtifact         - True for deliverables (code, decisions, structured lists)
+ * @property {string|null} codeLanguage   - Language identifier for code blocks, null otherwise
  * @property {string}  content            - Raw text
  * @property {string[]} tokens            - Preprocessed tokens
  * @property {number}  tokenEstimate      - Rough LLM token count
@@ -172,13 +177,18 @@ export function segmentMessages(messages) {
 
     for (const part of parts) {
       if (part.isCode) {
-        // Code block: atomic segment
+        // Code block: atomic segment — extract language from fence
+        const langMatch = part.text.match(/^```(\w*)/);
+        const codeLanguage = (langMatch && langMatch[1]) ? langMatch[1].toLowerCase() : null;
+
         segments.push({
           id: `msg_${msgIdx}_seg_${segIndex}`,
           messageIndex: msgIdx,
           messageId: msg.id,
           role: msg.role,
           type: 'code',
+          isArtifact: true,
+          codeLanguage,
           content: part.text,
           tokens: tokenize(part.text),
           tokenEstimate: estimateTokens(part.text),
@@ -194,12 +204,18 @@ export function segmentMessages(messages) {
 
         for (const para of paragraphs) {
           const type = classifySegment(para);
+          // Decisions and structured lists are artifacts (deliverables)
+          const isArtifact = (type === 'decision') ||
+            (type === 'list' && para.split('\n').length >= 3);
+
           segments.push({
             id: `msg_${msgIdx}_seg_${segIndex}`,
             messageIndex: msgIdx,
             messageId: msg.id,
             role: msg.role,
             type,
+            isArtifact,
+            codeLanguage: null,
             content: para,
             tokens: tokenize(para),
             tokenEstimate: estimateTokens(para),

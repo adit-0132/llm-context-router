@@ -1,223 +1,291 @@
 /**
- * TextRank Ranker + Greedy Selector
+ * Ranker v2 — Information-Theoretic Scoring + Dependency-Aware Selection
  *
- * Two responsibilities:
+ * Replaces TextRank (PageRank centrality) with a fundamentally different
+ * approach:
  *
- * 1. **TextRank**: Run PageRank on the weighted semantic graph to compute
- *    an importance score for every segment. Segments that are "central"
- *    (connected to many other important segments) rank high.
+ * Layer 2 — Scoring:
+ *   score = novelty × density × recency × role_weight
  *
- * 2. **Greedy Selection (MMR-style)**: Pick segments top-down by score,
- *    but enforce a diversity constraint — skip candidates that are too
- *    similar to already-selected segments. This avoids redundancy.
+ *   - novelty:    average IDF of the segment's terms (unique info)
+ *   - density:    novelty / tokenEstimate (information per token)
+ *   - recency:    e^(-λ × (1 - position)) (exponential decay from end)
+ *   - role_weight: user requirements and assistant code score highest
  *
- * Special rules:
- *   - First user message + last assistant message are always preserved
- *   - Final code blocks get a 2× boost
- *   - Decision segments get 1.5×
- *   - Meta/pleasantry segments get 0.1×
- *   - Segments in the last 25% get a recency boost
+ * Layer 3 — Selection:
+ *   1. Seed anchors:  first user msg + last assistant msg
+ *                     + non-superseded code from the last 30%
+ *   2. Resolve deps:  for each anchor, find earlier segments where
+ *                     rare terms first appeared → pull them in
+ *   3. Density fill:  fill remaining budget with highest-density segments
+ *   4. Diversity:     skip candidates too similar to already-selected
  */
 
 import { DEFAULT_CONFIG } from './config.js';
+import { TFIDFVectorizer } from './tfidf.js';
 
-// ── TextRank (PageRank on semantic graph) ───────────────────────────
+// ── Layer 2: Information-Theoretic Scoring ──────────────────────────
 
-export class TextRanker {
+export class Scorer {
   /**
-   * @param {import('./graph.js').SemanticGraph} graph
-   * @param {import('./segmenter.js').Segment[]} segments
+   * @param {import('./segmenter.js').Segment[]} segments - Live segments (post-analysis)
    * @param {Object} [config]
    */
-  constructor(graph, segments, config = {}) {
-    this.graph = graph;
+  constructor(segments, config = {}) {
     this.segments = segments;
     this.config = { ...DEFAULT_CONFIG, ...config };
 
-    /** @type {Map<string, number>} segmentId → raw PageRank score */
-    this.rawRanks = new Map();
+    /** @type {TFIDFVectorizer} */
+    this.vectorizer = new TFIDFVectorizer();
 
-    /** @type {Map<string, number>} segmentId → boosted score */
-    this.boostedRanks = new Map();
+    /** @type {Array<{ vector: Map<string, number>, norm: number }>} */
+    this.vectors = [];
+
+    /** @type {Map<string, number>} segmentId → composite score */
+    this.scores = new Map();
+
+    /** @type {Map<string, number>} term → index of first segment containing it */
+    this.termOrigins = new Map();
   }
 
   /**
-   * Run power-iteration PageRank.
-   *
-   * PR(v) = (1 - d) + d × Σ [ w(u,v) / Σ_out(u) × PR(u) ]
-   *
-   * where d = damping factor, w(u,v) = edge weight,
-   * Σ_out(u) = sum of all outgoing edge weights from u.
-   *
+   * Compute all scores. Must be called before selection.
    * @returns {Map<string, number>} segmentId → score
    */
-  computeRanks() {
+  computeScores() {
     const { segments, config } = this;
-    const d = config.dampingFactor;
-    const n = segments.length;
+    if (segments.length === 0) return new Map();
 
-    if (n === 0) return new Map();
+    // Step 1: Build TF-IDF vectors (used for novelty + diversity later)
+    this.vectors = this.vectorizer.fitTransform(segments);
 
-    // Initialize all scores to 1/n
-    const scores = new Map();
-    for (const seg of segments) {
-      scores.set(seg.id, 1 / n);
+    // Step 2: Build term origins index (for dependency resolution in Layer 3)
+    this._buildTermOrigins();
+
+    // Step 3: Compute composite score for each segment
+    //
+    // Formula:
+    //   score = (novelty × recency × roleWeight) + (artifactBoost × recency)
+    //
+    // The additive artifactBoost prevents code blocks from being drowned
+    // out by short novel text segments. Code blocks are long (low density)
+    // but are the primary deliverables — they should score high regardless
+    // of their information density.
+    //
+    // artifactBoost is a flat bonus for segments flagged as artifacts
+    // (code blocks, decisions, structured lists).
+    //
+    for (let i = 0; i < segments.length; i++) {
+      const seg = segments[i];
+      const vec = this.vectors[i];
+
+      const novelty      = this._computeNovelty(seg, vec);
+      const recency      = this._computeRecency(seg);
+      const roleWeight   = this._computeRoleWeight(seg);
+      const artifactBoost = seg.isArtifact ? 3.0 : 0;
+
+      const score = (novelty * recency * roleWeight) + (artifactBoost * recency);
+
+      this.scores.set(seg.id, score);
     }
 
-    // Precompute outgoing weight sums for each node
-    const outWeightSum = new Map();
-    for (const seg of segments) {
-      const neighbors = this.graph.getNeighbors(seg.id);
-      let sum = 0;
-      for (const w of neighbors.values()) sum += w;
-      outWeightSum.set(seg.id, sum || 1); // avoid div-by-zero
-    }
-
-    // Power iteration
-    for (let iter = 0; iter < config.maxIterations; iter++) {
-      const newScores = new Map();
-      let maxDelta = 0;
-
-      for (const seg of segments) {
-        const neighbors = this.graph.getNeighbors(seg.id);
-        let incoming = 0;
-
-        for (const [neighborId, weight] of neighbors) {
-          const neighborScore = scores.get(neighborId) || 0;
-          const neighborOutSum = outWeightSum.get(neighborId) || 1;
-          incoming += (weight / neighborOutSum) * neighborScore;
-        }
-
-        const newScore = (1 - d) / n + d * incoming;
-        newScores.set(seg.id, newScore);
-
-        const delta = Math.abs(newScore - (scores.get(seg.id) || 0));
-        if (delta > maxDelta) maxDelta = delta;
-      }
-
-      // Update scores
-      for (const [id, score] of newScores) {
-        scores.set(id, score);
-      }
-
-      // Check convergence
-      if (maxDelta < config.convergenceThreshold) {
-        break;
-      }
-    }
-
-    this.rawRanks = scores;
-    return scores;
+    return this.scores;
   }
 
   /**
-   * Apply type-based and position-based boost multipliers.
-   *
-   * @returns {Map<string, number>} segmentId → boosted score
+   * Novelty: average IDF of the segment's unique terms.
+   * High IDF = rare in the conversation = novel information.
    */
-  applyBoosts() {
-    const { segments, config } = this;
-    const boosted = new Map();
+  _computeNovelty(seg, vec) {
+    if (vec.vector.size === 0) return 0.01; // avoid zero
 
-    // Find the highest message index to determine "final" code blocks
-    const maxMsgIndex = Math.max(...segments.map(s => s.messageIndex));
-    const finalThreshold = maxMsgIndex * (1 - config.recencyWindow);
-
-    for (const seg of segments) {
-      let score = this.rawRanks.get(seg.id) || 0;
-
-      // ── Type-based boost ───────────────────────────────────────
-      if (seg.type === 'code' && seg.messageIndex >= finalThreshold) {
-        score *= config.boosts.code_final;
-      } else {
-        const boost = config.boosts[seg.type];
-        if (boost !== undefined) {
-          score *= boost;
-        }
-      }
-
-      // ── Recency boost ──────────────────────────────────────────
-      if (seg.positionNormalized >= (1 - config.recencyWindow)) {
-        score *= config.recencyMultiplier;
-      }
-
-      boosted.set(seg.id, score);
+    let totalIdf = 0;
+    for (const term of vec.vector.keys()) {
+      const idf = this.vectorizer.idf.get(term) || 0;
+      totalIdf += idf;
     }
 
-    this.boostedRanks = boosted;
-    return boosted;
+    return totalIdf / vec.vector.size;
   }
 
   /**
-   * Greedy selection with MMR-style diversity constraint.
-   *
-   * Algorithm:
-   *   1. Sort segments by boosted score (descending)
-   *   2. Always include first user msg + last assistant msg segments
-   *   3. For each candidate:
-   *      - If its max cosine similarity with any already-selected
-   *        segment exceeds `diversityThreshold`, skip it (redundant)
-   *      - Otherwise, add it to the selection
-   *   4. Stop when token budget is exhausted
+   * Recency: exponential decay from end of conversation.
+   * e^(-λ × (1 - position))
+   */
+  _computeRecency(seg) {
+    const lambda = this.config.recencyDecayLambda;
+    return Math.exp(-lambda * (1 - seg.positionNormalized));
+  }
+
+  /**
+   * Role-based weight.
+   * Assistant messages with code/decisions score highest.
+   * Short user acknowledgments score lowest.
+   */
+  _computeRoleWeight(seg) {
+    const weights = this.config.roleWeights;
+
+    if (seg.role === 'user') {
+      if (seg.type === 'question' || seg.isArtifact) {
+        return weights.user_requirement;
+      }
+      if (seg.content.length <= this.config.shortAcknowledgmentMaxChars &&
+          seg.content.trim().split(/\s+/).length <= 6) {
+        return weights.user_acknowledgment;
+      }
+      return weights.user_default;
+    }
+
+    // Assistant
+    if (seg.type === 'code' || seg.isArtifact) {
+      return weights.assistant_with_code;
+    }
+    if (seg.type === 'decision') {
+      return weights.assistant_with_decision;
+    }
+    // Check if this message has a sibling code block
+    // (assistant explanation next to code is more valuable)
+    const hasSiblingCode = this.segments.some(
+      s => s.messageIndex === seg.messageIndex && s.type === 'code'
+    );
+    if (hasSiblingCode) {
+      return weights.assistant_default; // slightly below code, but not penalized
+    }
+    return weights.assistant_explanation;
+  }
+
+  /**
+   * Build an index of term → first segment index where it appears.
+   * Used by dependency resolution in Layer 3.
+   */
+  _buildTermOrigins() {
+    this.termOrigins.clear();
+    for (let i = 0; i < this.segments.length; i++) {
+      for (const term of this.segments[i].tokens) {
+        if (!this.termOrigins.has(term)) {
+          this.termOrigins.set(term, i);
+        }
+      }
+    }
+  }
+
+  /**
+   * Get the TF-IDF vector for a segment by index.
+   * @param {number} idx
+   * @returns {{ vector: Map<string, number>, norm: number }}
+   */
+  getVector(idx) {
+    return this.vectors[idx];
+  }
+
+  /**
+   * Compute cosine similarity between two segment vectors.
+   * @param {number} idxA
+   * @param {number} idxB
+   * @returns {number}
+   */
+  cosineSimilarity(idxA, idxB) {
+    return this.vectorizer.cosineSimilarity(this.vectors[idxA], this.vectors[idxB]);
+  }
+}
+
+// ── Layer 3: Dependency-Aware Selection ─────────────────────────────
+
+export class Selector {
+  /**
+   * @param {Scorer} scorer
+   * @param {import('./segmenter.js').Segment[]} segments - Live segments
+   * @param {Object} [config]
+   */
+  constructor(scorer, segments, config = {}) {
+    this.scorer = scorer;
+    this.segments = segments;
+    this.config = { ...DEFAULT_CONFIG, ...config };
+
+    /** @type {Map<string, number>} segmentId → index in segments array */
+    this.idToIndex = new Map();
+    for (let i = 0; i < segments.length; i++) {
+      this.idToIndex.set(segments[i].id, i);
+    }
+  }
+
+  /**
+   * Run the full selection pipeline.
    *
    * @param {number} tokenBudget - Maximum tokens to keep
-   * @returns {{ selected: import('./segmenter.js').Segment[], dropped: import('./segmenter.js').Segment[] }}
+   * @returns {{ selected: import('./segmenter.js').Segment[], dropped: import('./segmenter.js').Segment[], usedTokens: number }}
    */
-  selectSegments(tokenBudget) {
-    const { segments, config, graph } = this;
+  select(tokenBudget) {
+    const { segments, config, scorer } = this;
 
-    // Sort by boosted rank
-    const sorted = [...segments].sort((a, b) => {
-      return (this.boostedRanks.get(b.id) || 0) - (this.boostedRanks.get(a.id) || 0);
-    });
-
-    const selected = [];
-    const selectedIndices = new Set(); // indices into this.segments
-    const selectedSet = new Set();     // segment IDs
+    const selectedSet = new Set();    // segment IDs
+    const selectedIndices = new Set(); // indices into segments array
     let usedTokens = 0;
 
-    // ── Step 1: Force-include anchors ────────────────────────────
+    // Helper: add a segment if budget allows
+    const addSegment = (seg) => {
+      if (selectedSet.has(seg.id)) return false;
+      if (usedTokens + seg.tokenEstimate > tokenBudget) return false;
+      selectedSet.add(seg.id);
+      selectedIndices.add(this.idToIndex.get(seg.id));
+      usedTokens += seg.tokenEstimate;
+      return true;
+    };
+
+    // ── Step 1: Seed anchors ─────────────────────────────────────
+    // First user message
     if (config.alwaysKeepFirstUserMessage) {
       const firstUser = segments.find(s => s.role === 'user');
-      if (firstUser) {
-        selected.push(firstUser);
-        selectedSet.add(firstUser.id);
-        selectedIndices.add(segments.indexOf(firstUser));
-        usedTokens += firstUser.tokenEstimate;
-      }
+      if (firstUser) addSegment(firstUser);
     }
 
+    // Last assistant message (all segments from it)
     if (config.alwaysKeepLastAssistantMessage) {
-      // Find all segments from the last assistant message
-      const lastAssistantMsgIndex = Math.max(
-        ...segments.filter(s => s.role === 'assistant').map(s => s.messageIndex)
+      const lastAssistantMsgIdx = Math.max(
+        ...segments.filter(s => s.role === 'assistant').map(s => s.messageIndex),
+        -1
       );
-      const lastAssistantSegs = segments.filter(
-        s => s.messageIndex === lastAssistantMsgIndex && s.role === 'assistant'
-      );
-      for (const seg of lastAssistantSegs) {
-        if (!selectedSet.has(seg.id)) {
-          selected.push(seg);
-          selectedSet.add(seg.id);
-          selectedIndices.add(segments.indexOf(seg));
-          usedTokens += seg.tokenEstimate;
-        }
+      if (lastAssistantMsgIdx >= 0) {
+        const lastAssistantSegs = segments.filter(
+          s => s.messageIndex === lastAssistantMsgIdx && s.role === 'assistant'
+        );
+        for (const seg of lastAssistantSegs) addSegment(seg);
       }
     }
 
-    // ── Step 2: Greedy selection with diversity ──────────────────
-    for (const candidate of sorted) {
-      if (selectedSet.has(candidate.id)) continue;
+    // Non-superseded code blocks from the anchor window (last 30%)
+    const anchorThreshold = 1 - config.anchorWindowFraction;
+    const anchorCodeBlocks = segments.filter(
+      s => s.type === 'code' && s.positionNormalized >= anchorThreshold
+    );
+    for (const seg of anchorCodeBlocks) addSegment(seg);
+
+    // ── Step 2: Resolve dependencies for anchors ─────────────────
+    // For each anchor, find earlier segments where rare terms first appeared
+    const anchorIds = new Set(selectedSet);
+    const depSegments = this._resolveDependencies(anchorIds);
+    for (const seg of depSegments) addSegment(seg);
+
+    // ── Step 3: Density-sorted fill ──────────────────────────────
+    // Sort remaining segments by information density (score / tokenEstimate)
+    const remaining = segments
+      .filter(s => !selectedSet.has(s.id))
+      .map(s => ({
+        segment: s,
+        density: (scorer.scores.get(s.id) || 0) / (s.tokenEstimate || 1),
+        score: scorer.scores.get(s.id) || 0,
+      }))
+      .sort((a, b) => b.density - a.density);
+
+    for (const { segment: candidate } of remaining) {
       if (usedTokens + candidate.tokenEstimate > tokenBudget) continue;
 
-      // Diversity check: max similarity with already-selected
-      const candidateIdx = segments.indexOf(candidate);
-      const candidateVec = graph.getVector(candidateIdx);
+      // Diversity check: max cosine similarity with already-selected
+      const candidateIdx = this.idToIndex.get(candidate.id);
       let tooSimilar = false;
 
       for (const selIdx of selectedIndices) {
-        const selVec = graph.getVector(selIdx);
-        const sim = graph.vectorizer.cosineSimilarity(candidateVec, selVec);
+        const sim = scorer.cosineSimilarity(candidateIdx, selIdx);
         if (sim > config.diversityThreshold) {
           tooSimilar = true;
           break;
@@ -226,15 +294,73 @@ export class TextRanker {
 
       if (tooSimilar) continue;
 
-      selected.push(candidate);
-      selectedSet.add(candidate.id);
-      selectedIndices.add(candidateIdx);
-      usedTokens += candidate.tokenEstimate;
+      addSegment(candidate);
     }
 
-    // Dropped = everything not selected
+    // Build results
+    const selected = segments.filter(s => selectedSet.has(s.id));
     const dropped = segments.filter(s => !selectedSet.has(s.id));
 
     return { selected, dropped, usedTokens };
+  }
+
+  /**
+   * Resolve dependencies for a set of anchor segments.
+   *
+   * For each anchor, find its "rare" terms (IDF above median),
+   * then find the earliest segment where each rare term first appeared.
+   * Those origin segments are dependencies.
+   *
+   * @param {Set<string>} anchorIds
+   * @returns {import('./segmenter.js').Segment[]}
+   */
+  _resolveDependencies(anchorIds) {
+    const { segments, scorer, config } = this;
+
+    // Compute median IDF for "rare" threshold
+    const allIdfs = [...scorer.vectorizer.idf.values()].sort((a, b) => a - b);
+    const medianIdf = allIdfs[Math.floor(allIdfs.length * config.dependencyIdfPercentile)] || 0;
+
+    const depIds = new Set();
+
+    for (const anchorId of anchorIds) {
+      const anchorIdx = this.idToIndex.get(anchorId);
+      if (anchorIdx === undefined) continue;
+
+      const anchor = segments[anchorIdx];
+      let depsFound = 0;
+
+      // Find rare terms in the anchor
+      const rareTerms = anchor.tokens.filter(t => {
+        const idf = scorer.vectorizer.idf.get(t);
+        return idf !== undefined && idf > medianIdf;
+      });
+
+      // Deduplicate
+      const uniqueRareTerms = [...new Set(rareTerms)];
+
+      // Sort by IDF descending (rarest first — most likely to be meaningful)
+      uniqueRareTerms.sort((a, b) =>
+        (scorer.vectorizer.idf.get(b) || 0) - (scorer.vectorizer.idf.get(a) || 0)
+      );
+
+      for (const term of uniqueRareTerms) {
+        if (depsFound >= config.maxDependenciesPerAnchor) break;
+
+        const originIdx = scorer.termOrigins.get(term);
+        if (originIdx === undefined) continue;
+
+        const originSeg = segments[originIdx];
+        // Only pull in if it's a different, earlier segment
+        if (originSeg.id === anchorId) continue;
+        if (originSeg.positionNormalized >= anchor.positionNormalized) continue;
+        if (anchorIds.has(originSeg.id) || depIds.has(originSeg.id)) continue;
+
+        depIds.add(originSeg.id);
+        depsFound++;
+      }
+    }
+
+    return segments.filter(s => depIds.has(s.id));
   }
 }

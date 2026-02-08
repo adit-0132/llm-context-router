@@ -222,7 +222,11 @@ function showCompressionStats(stats) {
   statCompressed.textContent = formatTokens(stats.compressedTokens);
   statRatio.textContent = `${Math.round(stats.ratio * 100)}%`;
   statSegments.textContent = `${stats.selectedSegments}/${stats.segments} segments`;
-  statTime.textContent = `${stats.elapsed}ms`;
+
+  const details = [`${stats.elapsed}ms`];
+  if (stats.supersededCode > 0) details.push(`${stats.supersededCode} old code removed`);
+  if (stats.eliminatedMeta > 0) details.push(`${stats.eliminatedMeta} meta removed`);
+  statTime.textContent = details.join(' · ');
 }
 
 function hideStats() {

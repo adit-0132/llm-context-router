@@ -1,54 +1,72 @@
 /**
- * Compression Engine Configuration
+ * Compression Engine Configuration — v2
  *
- * All tunable parameters for the semantic graph compression pipeline.
- * Weights, thresholds, and boost multipliers are exposed here so they
- * can be adjusted without touching algorithm code.
+ * All tunable parameters for the 3-layer compression pipeline.
+ *
+ * Layer 1: Structural Analysis (supersession, meta elimination)
+ * Layer 2: Information-Theoretic Scoring (novelty × density × recency × role)
+ * Layer 3: Dependency-Aware Selection (anchors → deps → density fill)
  */
 
 export const DEFAULT_CONFIG = Object.freeze({
-  // ── Edge Weight Coefficients ──────────────────────────────────────
-  // Composite edge weight = α·content + β·temporal + γ·crossRole + δ·reference
-  alpha: 0.40,   // Content similarity (TF-IDF cosine)
-  beta:  0.20,   // Temporal proximity in conversation
-  gamma: 0.25,   // Cross-role bonus (user ↔ assistant)
-  delta: 0.15,   // Explicit reference detection
+  // ── Layer 1: Structural Analysis ──────────────────────────────────
 
-  // ── TextRank (PageRank) Parameters ────────────────────────────────
-  dampingFactor: 0.85,       // PageRank damping (standard value)
-  convergenceThreshold: 0.0001,
-  maxIterations: 100,
+  // Code supersession: if two code blocks share > this fraction of tokens
+  // (Jaccard similarity) and are in the same language, the older one is stale.
+  supersessionJaccardThreshold: 0.30,
 
-  // ── Segment Type Boost Multipliers ────────────────────────────────
-  boosts: Object.freeze({
-    code_final:  2.0,   // Code blocks in the last 25% of conversation
-    code:        1.2,   // Code blocks elsewhere
-    decision:    1.5,   // "Let's go with X", "I'll use Y"
-    question:    1.0,   // Neutral
-    reasoning:   1.0,   // Neutral
-    list:        0.9,   // Slightly lower — often verbose
-    meta:        0.1,   // "Thanks!", "Sure!", greetings
+  // Meta elimination: segments classified as 'meta' are removed entirely
+  eliminateMeta: true,
+
+  // ── Layer 2: Information Scoring ──────────────────────────────────
+
+  // Exponential recency decay: score = e^(-λ × (1 - position))
+  // λ = 2.0 → half-life at ~35% from the end
+  //   position 1.0 (latest):  recency = 1.0
+  //   position 0.5 (middle):  recency = 0.37
+  //   position 0.0 (oldest):  recency = 0.14
+  recencyDecayLambda: 2.0,
+
+  // Role-based weight multipliers
+  roleWeights: Object.freeze({
+    user_requirement:       1.5,   // User message with question or constraint
+    user_acknowledgment:    0.2,   // User message that's short / affirmative
+    user_default:           0.8,   // User message — general
+    assistant_with_code:    2.0,   // Assistant message containing code blocks
+    assistant_with_decision: 1.8,  // Assistant message containing decisions
+    assistant_explanation:  0.6,   // Assistant message — explanation only
+    assistant_default:      0.8,   // Assistant message — general
   }),
 
-  // ── Recency Boost ─────────────────────────────────────────────────
-  // Segments in the last `recencyWindow` fraction get `recencyMultiplier`
-  recencyWindow: 0.25,       // Last 25% of conversation
-  recencyMultiplier: 1.3,
+  // Short acknowledgment threshold: user messages with fewer chars than this
+  // and no question marks are classified as "acknowledgment"
+  shortAcknowledgmentMaxChars: 80,
 
-  // ── Diversity Constraint (MMR-style) ──────────────────────────────
-  // A candidate is only added if its max cosine similarity with
-  // already-selected segments is below this threshold.
+  // ── Layer 3: Selection ────────────────────────────────────────────
+
+  // Anchor window: non-superseded code blocks from the last N% of
+  // the conversation are automatic anchors (always kept).
+  anchorWindowFraction: 0.30,  // last 30%
+
+  // Dependency detection: a term is "rare" if its IDF is above median IDF.
+  // For each anchor, we find where rare terms first appeared → dependency.
+  // This threshold controls the minimum IDF percentile for a term to
+  // be considered when detecting dependencies.
+  dependencyIdfPercentile: 0.50,  // above median
+
+  // Max dependencies to pull per anchor (prevents explosion)
+  maxDependenciesPerAnchor: 5,
+
+  // Diversity constraint (MMR-style): skip candidate if max cosine
+  // similarity with any already-selected segment exceeds this.
   diversityThreshold: 0.70,
 
-  // ── Graph Construction ────────────────────────────────────────────
-  edgePruneThreshold: 0.05,  // Drop edges with weight below this
+  // ── Shared ────────────────────────────────────────────────────────
 
-  // ── Token Estimation ──────────────────────────────────────────────
-  // Rough chars-per-token ratio for budget estimation.
-  // English text averages ~4 chars/token; code is denser (~3.5).
+  // Token estimation: chars per token (English ≈ 4, code ≈ 3.5)
   charsPerToken: 4,
 
-  // ── Always-Preserve Rules ─────────────────────────────────────────
+  // Always-preserve anchors
   alwaysKeepFirstUserMessage: true,
   alwaysKeepLastAssistantMessage: true,
 });
@@ -61,8 +79,6 @@ export const DEFAULT_CONFIG = Object.freeze({
  *    70 = conservative — keep ~70% of tokens
  *    40 = moderate (DEFAULT) — keep ~40% of tokens
  *    15 = aggressive — keep ~15% of tokens
- *
- * `tokenBudgetFraction` is the fraction of original tokens to retain.
  */
 export const PRESETS = Object.freeze({
   RAW:          { quality: 100, tokenBudgetFraction: 1.00, label: 'Raw (no compression)' },
@@ -80,6 +96,5 @@ export const PRESETS = Object.freeze({
  */
 export function qualityToFraction(sliderValue) {
   const clamped = Math.max(0, Math.min(100, sliderValue));
-  // Map [0, 100] → [0.05, 1.0]
   return 0.05 + (clamped / 100) * 0.95;
 }
