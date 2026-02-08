@@ -6,35 +6,113 @@
 </head>
 <body>
   <div class="container">
-    <h1>Context Porter</h1>
-    
+    <header class="header">
+      <h1>
+        <span class="logo-icon">◈</span>
+        Context Porter
+      </h1>
+      <span class="version">v2.0</span>
+    </header>
+
     <div id="status" class="status"></div>
-    
+
+    <!-- Platform & Message Info -->
+    <div class="info-bar">
+      <div class="info-chip">
+        <span class="info-label">Platform</span>
+        <span id="platform" class="info-value">Detecting...</span>
+      </div>
+      <div class="info-chip">
+        <span class="info-label">Messages</span>
+        <span id="messageCount" class="info-value">—</span>
+      </div>
+    </div>
+
+    <!-- Export Section -->
     <div class="section">
       <h2>Export</h2>
+
+      <!-- Compression Quality Slider -->
+      <div class="slider-group">
+        <div class="slider-header">
+          <label for="qualitySlider" class="slider-label">Compression Quality</label>
+          <span id="qualityValue" class="slider-value">40%</span>
+        </div>
+        <input
+          type="range"
+          id="qualitySlider"
+          min="0"
+          max="100"
+          value="40"
+          class="quality-slider"
+        >
+        <div class="slider-ticks">
+          <span data-val="15">Aggressive</span>
+          <span data-val="40">Moderate</span>
+          <span data-val="70">Conservative</span>
+          <span data-val="100">Raw</span>
+        </div>
+      </div>
+
+      <!-- Mode Toggle -->
+      <div class="mode-toggle">
+        <button id="modeSmartBtn" class="mode-btn active" data-mode="smart">
+          <span class="mode-icon">◆</span> Smart Compress
+        </button>
+        <button id="modeRawBtn" class="mode-btn" data-mode="raw">
+          <span class="mode-icon">▤</span> Raw Export
+        </button>
+      </div>
+
       <button id="exportBtn" class="btn btn-primary">
-        Export Current Chat
+        <span class="btn-text">Export Chat</span>
+        <span class="btn-icon">↓</span>
       </button>
-      <p class="hint">Saves conversation as .llmchat file</p>
+
+      <!-- Progress Bar (hidden by default) -->
+      <div id="progressContainer" class="progress-container hidden">
+        <div class="progress-bar">
+          <div id="progressFill" class="progress-fill"></div>
+        </div>
+        <span id="progressLabel" class="progress-label">Starting...</span>
+      </div>
+
+      <!-- Compression Stats (shown after export) -->
+      <div id="compressionStats" class="stats-panel hidden">
+        <div class="stats-grid">
+          <div class="stat">
+            <span class="stat-value" id="statOriginal">—</span>
+            <span class="stat-label">Original</span>
+          </div>
+          <div class="stat-arrow">→</div>
+          <div class="stat">
+            <span class="stat-value" id="statCompressed">—</span>
+            <span class="stat-label">Compressed</span>
+          </div>
+          <div class="stat">
+            <span class="stat-value accent" id="statRatio">—</span>
+            <span class="stat-label">Kept</span>
+          </div>
+        </div>
+        <div class="stats-detail">
+          <span id="statSegments" class="stat-detail-item"></span>
+          <span id="statTime" class="stat-detail-item"></span>
+        </div>
+      </div>
     </div>
-    
+
+    <!-- Import Section -->
     <div class="section">
       <h2>Import</h2>
       <input type="file" id="fileInput" accept=".llmchat" style="display:none">
       <button id="importBtn" class="btn btn-secondary">
-        Convert to Markdown
+        <span class="btn-text">Convert to Markdown</span>
+        <span class="btn-icon">↑</span>
       </button>
-      <p class="hint">Upload .llmchat file to convert</p>
-    </div>
-    
-    <div class="section">
-      <div class="info">
-        <span id="platform">Unknown platform</span>
-        <span id="messageCount">-</span>
-      </div>
+      <p class="hint">Upload .llmchat file to convert for import</p>
     </div>
   </div>
-  
+
   <script src="popup.js"></script>
 </body>
 </html>
