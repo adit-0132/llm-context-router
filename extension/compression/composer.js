@@ -105,17 +105,34 @@ export function compose(
     messageGroups.get(seg.messageIndex).push(seg);
   }
 
+  // ── Step 1b: Rescue orphaned artifacts ────────────────────────
+  // If a message has artifacts but ALL its text segments were dropped,
+  // we still need to include the message so the files aren't lost.
+  for (let i = 0; i < originalData.messages.length; i++) {
+    const msg = originalData.messages[i];
+    if (msg.artifacts && msg.artifacts.length > 0 && !messageGroups.has(i)) {
+      // Create a stub entry so the artifact survives
+      messageGroups.set(i, []);
+    }
+  }
+
   // ── Step 2: Reassemble messages ───────────────────────────────
   const compressedMessages = [];
 
-  for (const [msgIdx, segs] of messageGroups) {
+  // Sort by message index for chronological order
+  const sortedMsgIndices = [...messageGroups.keys()].sort((a, b) => a - b);
+
+  for (const msgIdx of sortedMsgIndices) {
+    const segs = messageGroups.get(msgIdx);
     const originalMsg = originalData.messages[msgIdx];
     if (!originalMsg) continue;
 
-    // Merge segment contents with double newlines
-    const mergedContent = segs.map(s => s.content).join('\n\n');
+    // Merge segment contents (may be empty for artifact-only stubs)
+    const mergedContent = segs.length > 0
+      ? segs.map(s => s.content).join('\n\n')
+      : originalMsg.content || '';
 
-    compressedMessages.push({
+    const compressedMsg = {
       id: originalMsg.id,
       role: originalMsg.role,
       content: mergedContent,
@@ -127,12 +144,14 @@ export function compose(
           segment_types: [...new Set(segs.map(s => s.type))],
         }
       }
-    });
+    };
 
     // Preserve artifacts if present
     if (originalMsg.artifacts && originalMsg.artifacts.length > 0) {
-      compressedMessages[compressedMessages.length - 1].artifacts = originalMsg.artifacts;
+      compressedMsg.artifacts = originalMsg.artifacts;
     }
+
+    compressedMessages.push(compressedMsg);
   }
 
   // ── Step 3: Compute statistics ────────────────────────────────
@@ -167,14 +186,13 @@ export function compose(
       compressed_messages: compressedMessages.length,
       compressed_tokens_estimate: usedTokens,
       compression_ratio: parseFloat((usedTokens / originalTokens).toFixed(3)),
-      compression_method: 'semantic-graph-textrank-v1',
+      compression_method: 'artifact-aware-dependency-v2',
       quality_level: qualitySlider,
       compression_config: {
-        alpha: compressionConfig.alpha,
-        beta: compressionConfig.beta,
-        gamma: compressionConfig.gamma,
-        delta: compressionConfig.delta,
+        recency_decay: compressionConfig.recencyDecayLambda,
         diversity_threshold: compressionConfig.diversityThreshold,
+        supersession_jaccard: compressionConfig.supersessionJaccardThreshold,
+        anchor_window: compressionConfig.anchorWindowFraction,
       }
     },
     messages: compressedMessages,

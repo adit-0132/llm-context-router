@@ -92,7 +92,7 @@ function convertChatGPTToLLMChat(chatgptJson) {
       const role = node.message.author.role;
 
       if (role === 'user' || role === 'assistant') {
-        collected.unshift({
+        const message = {
           id: node.message.id,
           role: role,
           content: node.message.content.parts
@@ -104,7 +104,68 @@ function convertChatGPTToLLMChat(chatgptJson) {
           metadata: {
             model_slug: node.message.metadata?.model_slug || null,
           }
-        });
+        };
+
+        // ── Extract file attachments ─────────────────────────────
+        const artifacts = [];
+
+        // Parse metadata.attachments (uploaded files like PDFs, CSVs, etc.)
+        const attachments = node.message.metadata?.attachments;
+        if (attachments && Array.isArray(attachments)) {
+          for (const att of attachments) {
+            if (att.mime_type && att.mime_type.startsWith('image/')) {
+              artifacts.push({
+                type: 'image',
+                file_name: att.name || att.id || 'image',
+                file_id: att.id || null,
+              });
+            } else {
+              // Document attachment (PDF, text, CSV, etc.)
+              // ChatGPT sometimes includes extracted text in the content parts
+              let extractedContent = null;
+
+              // Check if any non-string parts contain the file's text
+              const textParts = node.message.content?.parts?.filter(
+                p => typeof p === 'object' && p !== null && p.text
+              );
+              if (textParts && textParts.length > 0) {
+                extractedContent = textParts.map(p => p.text).join('\n');
+              }
+
+              artifacts.push({
+                type: 'document',
+                file_name: att.name || att.id || 'document',
+                file_type: att.mime_type || null,
+                file_size: att.size || null,
+                content: extractedContent || '[Content not extracted]',
+              });
+            }
+          }
+        }
+
+        // Parse multimodal image parts (inline images in GPT-4 Vision)
+        if (node.message.content?.parts) {
+          for (const part of node.message.content.parts) {
+            if (typeof part === 'object' && part !== null) {
+              if (part.content_type === 'image_asset_pointer' ||
+                  part.asset_pointer) {
+                artifacts.push({
+                  type: 'image',
+                  file_name: part.metadata?.dalle?.prompt
+                    ? `DALL-E: ${part.metadata.dalle.prompt.substring(0, 50)}`
+                    : 'image',
+                  file_id: part.asset_pointer || null,
+                });
+              }
+            }
+          }
+        }
+
+        if (artifacts.length > 0) {
+          message.artifacts = artifacts;
+        }
+
+        collected.unshift(message);
       }
     }
 

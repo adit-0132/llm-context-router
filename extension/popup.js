@@ -34,6 +34,9 @@ const statRatio            = document.getElementById('statRatio');
 const statSegments         = document.getElementById('statSegments');
 const statTime             = document.getElementById('statTime');
 
+const includeArtifactsCheckbox = document.getElementById('includeArtifacts');
+const artifactHint         = document.getElementById('artifactHint');
+
 // ── State ───────────────────────────────────────────────────────────
 
 let currentMode = 'smart'; // 'smart' | 'raw'
@@ -131,15 +134,20 @@ exportBtn.addEventListener('click', () => {
       messageCountSpan.textContent = `${response.messageCount}`;
 
       const quality = parseInt(qualitySlider.value, 10);
+      const includeArtifacts = includeArtifactsCheckbox.checked;
 
       if (currentMode === 'raw' || quality >= 100) {
         // Raw export — no compression
-        downloadFile(response.data, response.platform, response.conversationId);
+        let exportData = response.data;
+        if (!includeArtifacts) {
+          exportData = stripArtifacts(exportData);
+        }
+        downloadFile(exportData, response.platform, response.conversationId);
         showStatus(`Exported ${response.messageCount} messages (raw)`, 'success');
         exportBtn.disabled = false;
       } else {
         // Smart compression via Web Worker
-        runCompression(response.data, quality, response.platform, response.conversationId);
+        runCompression(response.data, quality, response.platform, response.conversationId, includeArtifacts);
       }
     });
   });
@@ -147,7 +155,7 @@ exportBtn.addEventListener('click', () => {
 
 // ── Compression via Web Worker ──────────────────────────────────────
 
-function runCompression(llmchatData, quality, platform, conversationId) {
+function runCompression(llmchatData, quality, platform, conversationId, includeArtifacts) {
   showProgress(true);
   updateProgress(0, 'Initializing compression...');
 
@@ -199,6 +207,7 @@ function runCompression(llmchatData, quality, platform, conversationId) {
     type: 'compress',
     data: llmchatData,
     quality: quality,
+    includeArtifacts: includeArtifacts,
   });
 }
 
@@ -357,4 +366,19 @@ function downloadFile(data, platform, conversationId) {
   document.body.removeChild(a);
 
   setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+/**
+ * Strip all artifacts from .llmchat data (when checkbox is unchecked).
+ * Returns a new object — does not mutate the original.
+ */
+function stripArtifacts(data) {
+  return {
+    ...data,
+    messages: data.messages.map(msg => {
+      if (!msg.artifacts) return msg;
+      const { artifacts, ...rest } = msg;
+      return rest;
+    })
+  };
 }

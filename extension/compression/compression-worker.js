@@ -24,7 +24,7 @@ import { Scorer, Selector } from './ranker.js';
 import { compose } from './composer.js';
 
 self.onmessage = function (event) {
-  const { type, data, quality, config: userConfig } = event.data;
+  const { type, data, quality, config: userConfig, includeArtifacts } = event.data;
 
   if (type !== 'compress') {
     self.postMessage({ type: 'error', message: `Unknown message type: ${type}` });
@@ -38,7 +38,8 @@ self.onmessage = function (event) {
     // ── Stage 1: Segmentation ────────────────────────────────────
     self.postMessage({ type: 'progress', stage: 'Segmenting messages...', fraction: 0 });
 
-    const allSegments = segmentMessages(data.messages);
+    const segmentOptions = { includeArtifacts: includeArtifacts !== false };
+    const allSegments = segmentMessages(data.messages, segmentOptions);
     const totalOriginalTokens = allSegments.reduce((sum, s) => sum + s.tokenEstimate, 0);
 
     self.postMessage({

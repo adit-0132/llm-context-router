@@ -5,6 +5,7 @@
  *
  * Segment types:
  *   - code:      fenced code blocks (triple backticks) — treated as atomic
+ *   - document:  attached files (PDFs, text uploads) — treated as atomic artifacts
  *   - question:  ends with '?' or starts with interrogative words
  *   - decision:  contains decision/conclusion language
  *   - meta:      greetings, thanks, pleasantries — low value
@@ -12,8 +13,9 @@
  *   - reasoning: default — explanations, analysis, discussion
  *
  * Each segment also carries:
- *   - isArtifact:   true for code, decisions, structured lists (the "deliverables")
+ *   - isArtifact:   true for code, documents, decisions, structured lists
  *   - codeLanguage: for code segments, the language identifier (e.g., 'javascript')
+ *   - artifactFileName: for document segments, the original file name
  */
 
 import { STOPWORDS } from './stopwords.js';
@@ -114,9 +116,10 @@ function classifySegment(text) {
  * @property {number}  messageIndex       - Index in the messages array
  * @property {string}  messageId          - UUID of the parent message
  * @property {'user'|'assistant'} role
- * @property {'code'|'reasoning'|'decision'|'question'|'meta'|'list'} type
- * @property {boolean} isArtifact         - True for deliverables (code, decisions, structured lists)
+ * @property {'code'|'document'|'reasoning'|'decision'|'question'|'meta'|'list'} type
+ * @property {boolean} isArtifact         - True for deliverables (code, documents, decisions, structured lists)
  * @property {string|null} codeLanguage   - Language identifier for code blocks, null otherwise
+ * @property {string|null} artifactFileName - Original file name for document segments
  * @property {string}  content            - Raw text
  * @property {string[]} tokens            - Preprocessed tokens
  * @property {number}  tokenEstimate      - Rough LLM token count
@@ -129,13 +132,15 @@ function classifySegment(text) {
  * @param {Object[]} messages - The messages array from .llmchat
  * @returns {Segment[]}
  */
-export function segmentMessages(messages) {
+export function segmentMessages(messages, options = {}) {
   const segments = [];
   const totalMessages = messages.length;
+  const includeArtifacts = options.includeArtifacts !== false; // default: true
 
   messages.forEach((msg, msgIdx) => {
     const content = msg.content || '';
-    if (!content.trim()) return;
+    const hasArtifacts = includeArtifacts && msg.artifacts && msg.artifacts.length > 0;
+    if (!content.trim() && !hasArtifacts) return;
 
     const position = totalMessages > 1
       ? msgIdx / (totalMessages - 1)
@@ -189,6 +194,7 @@ export function segmentMessages(messages) {
           type: 'code',
           isArtifact: true,
           codeLanguage,
+          artifactFileName: null,
           content: part.text,
           tokens: tokenize(part.text),
           tokenEstimate: estimateTokens(part.text),
@@ -216,9 +222,38 @@ export function segmentMessages(messages) {
             type,
             isArtifact,
             codeLanguage: null,
+            artifactFileName: null,
             content: para,
             tokens: tokenize(para),
             tokenEstimate: estimateTokens(para),
+            positionNormalized: position,
+          });
+          segIndex++;
+        }
+      }
+    }
+
+    // ── Step 3: Process attached artifacts (documents) ───────────
+    // Document artifacts (PDFs, text uploads) are treated as atomic
+    // high-value segments. This fixes the "ghost token" problem where
+    // artifact content bypassed token estimation entirely.
+    if (hasArtifacts) {
+      for (const artifact of msg.artifacts) {
+        if (artifact.type === 'document' && artifact.content &&
+            artifact.content !== '[Content not extracted]') {
+          const docContent = `[Attached: ${artifact.file_name}]\n${artifact.content}`;
+          segments.push({
+            id: `msg_${msgIdx}_seg_${segIndex}`,
+            messageIndex: msgIdx,
+            messageId: msg.id,
+            role: msg.role,
+            type: 'document',
+            isArtifact: true,
+            codeLanguage: null,
+            artifactFileName: artifact.file_name,
+            content: docContent,
+            tokens: tokenize(artifact.content),
+            tokenEstimate: estimateTokens(docContent),
             positionNormalized: position,
           });
           segIndex++;
