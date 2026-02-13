@@ -57,6 +57,8 @@ chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
     platformSpan.textContent = 'ChatGPT';
   } else if (url.includes('claude.ai')) {
     platformSpan.textContent = 'Claude';
+  } else if (url.includes('gemini.google.com')) {
+    platformSpan.textContent = 'Gemini';
   } else {
     platformSpan.textContent = 'Unsupported';
     exportBtn.disabled = true;
