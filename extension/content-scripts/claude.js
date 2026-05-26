@@ -11,13 +11,19 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
 async function exportClaudeConversation() {
   try {
-    // Check if we're on a chat page
-    const urlMatch = window.location.pathname.match(/\/chat\/([a-f0-9-]+)/);
-    if (!urlMatch) {
+    const pathname = window.location.pathname;
+
+    const shareMatch = pathname.match(/\/share\/([a-f0-9-]+)/);
+    if (shareMatch) {
+      return exportSharedConversation(shareMatch[1]);
+    }
+
+    const chatMatch = pathname.match(/\/chat\/([a-f0-9-]+)/);
+    if (!chatMatch) {
       return { success: false, error: 'Open a conversation first' };
     }
 
-    const conversationId = urlMatch[1];
+    const conversationId = chatMatch[1];
     console.log('[ContextPorter] Conversation ID:', conversationId);
 
     // Get org ID from cookie
@@ -68,6 +74,122 @@ async function exportClaudeConversation() {
     console.error('[ContextPorter] Error:', error);
     return { success: false, error: error.message };
   }
+}
+
+async function exportSharedConversation(shareId) {
+  console.log('[ContextPorter] Shared conversation ID:', shareId);
+
+  const messages = extractSharedMessagesFromDOM();
+  if (messages.length === 0) {
+    return { success: false, error: 'Could not extract messages from shared page' };
+  }
+
+  // Try to get a title from the page
+  const title = document.querySelector('h1, title')?.textContent?.trim() || 'Shared Conversation';
+
+  const llmchatData = {
+    version: "1.0",
+    standard: "llmchat",
+    metadata: {
+      title,
+      source_platform: "claude.ai",
+      source_model: "claude",
+      conversation_id: shareId,
+      total_messages: messages.length,
+    },
+    messages,
+  };
+
+  return {
+    success: true,
+    platform: 'claude',
+    conversationId: shareId,
+    messageCount: messages.length,
+    data: llmchatData,
+  };
+}
+
+function extractSharedMessagesFromDOM() {
+  // Strategy 1: data-testid attributes (most reliable)
+  const humanTurns = document.querySelectorAll('[data-testid="human-turn"]');
+  const aiTurns = document.querySelectorAll('[data-testid="ai-turn"]');
+  if (humanTurns.length > 0 || aiTurns.length > 0) {
+    return extractFromTestIdTurns();
+  }
+
+  // Strategy 2: interleaved turn containers by role class
+  const turns = document.querySelectorAll('.human-turn, .ai-turn, [class*="humanTurn"], [class*="aiTurn"]');
+  if (turns.length > 0) {
+    return extractFromClassTurns(turns);
+  }
+
+  // Strategy 3: look for message role attributes
+  const roleEls = document.querySelectorAll('[data-message-author-role]');
+  if (roleEls.length > 0) {
+    return Array.from(roleEls).map((el, i) => ({
+      id: `shared_msg_${i}`,
+      role: el.getAttribute('data-message-author-role') === 'user' ? 'user' : 'assistant',
+      content: el.innerText.trim(),
+      timestamp: null,
+      metadata: {},
+    })).filter(m => m.content);
+  }
+
+  return [];
+}
+
+function extractFromTestIdTurns() {
+  // Collect all turns in DOM order, tagging each with its role
+  const all = document.querySelectorAll('[data-testid="human-turn"], [data-testid="ai-turn"]');
+  const messages = [];
+
+  Array.from(all).forEach((el, i) => {
+    const isHuman = el.getAttribute('data-testid') === 'human-turn';
+    const content = extractTurnText(el, isHuman);
+    if (!content) return;
+    messages.push({
+      id: `shared_msg_${i}`,
+      role: isHuman ? 'user' : 'assistant',
+      content,
+      timestamp: null,
+      metadata: {},
+    });
+  });
+
+  return messages;
+}
+
+function extractFromClassTurns(turns) {
+  const messages = [];
+  Array.from(turns).forEach((el, i) => {
+    const cls = el.className || '';
+    const isHuman = /human/i.test(cls);
+    const content = extractTurnText(el, isHuman);
+    if (!content) return;
+    messages.push({
+      id: `shared_msg_${i}`,
+      role: isHuman ? 'user' : 'assistant',
+      content,
+      timestamp: null,
+      metadata: {},
+    });
+  });
+  return messages;
+}
+
+function extractTurnText(el, isHuman) {
+  const clone = el.cloneNode(true);
+
+  // Remove action buttons and UI chrome
+  clone.querySelectorAll('button, [role="button"], [aria-label], .copy-button, .action-bar').forEach(n => n.remove());
+
+  if (isHuman) {
+    return clone.innerText?.trim() || '';
+  }
+
+  // For assistant: prefer the prose/markdown container
+  const prose = clone.querySelector('.prose, [class*="prose"], .markdown, [class*="markdown"]');
+  return (prose || clone).innerText?.trim() || '';
 }
 
 function convertClaudeToLLMChat(claudeJson) {

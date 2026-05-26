@@ -59,13 +59,15 @@ chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
     platformSpan.textContent = 'Claude';
   } else if (url.includes('gemini.google.com')) {
     platformSpan.textContent = 'Gemini';
+  } else if (url.includes('grok.com')) {
+    platformSpan.textContent = 'Grok';
   } else {
     platformSpan.textContent = 'Unsupported';
     exportBtn.disabled = true;
   }
 });
 
-// ── Quality Slider ──────────────────────────────────────────────────
+// Quality Slider 
 
 qualitySlider.addEventListener('input', () => {
   const val = parseInt(qualitySlider.value, 10);
@@ -106,7 +108,7 @@ function setMode(mode) {
   }
 }
 
-// ── Export Button ───────────────────────────────────────────────────
+// Export Button
 
 exportBtn.addEventListener('click', () => {
   showStatus('Extracting conversation...', 'info');
@@ -155,7 +157,7 @@ exportBtn.addEventListener('click', () => {
   });
 });
 
-// ── Compression via Web Worker ──────────────────────────────────────
+// Compression via Web Worker
 
 function runCompression(llmchatData, quality, platform, conversationId, includeArtifacts) {
   showProgress(true);
@@ -213,7 +215,7 @@ function runCompression(llmchatData, quality, platform, conversationId, includeA
   });
 }
 
-// ── Progress UI ─────────────────────────────────────────────────────
+// Progress UI 
 
 function showProgress(visible) {
   progressContainer.classList.toggle('hidden', !visible);
@@ -224,7 +226,7 @@ function updateProgress(fraction, label) {
   progressLabel.textContent = label;
 }
 
-// ── Stats Display ───────────────────────────────────────────────────
+// Stats Display
 
 function showCompressionStats(stats) {
   compressionStats.classList.remove('hidden');
@@ -249,7 +251,7 @@ function formatTokens(n) {
   return String(n);
 }
 
-// ── Import Button ───────────────────────────────────────────────────
+// Import Button
 
 importBtn.addEventListener('click', () => {
   fileInput.click();
@@ -295,7 +297,7 @@ fileInput.addEventListener('change', async (e) => {
   fileInput.value = '';
 });
 
-// ── Markdown Conversion ─────────────────────────────────────────────
+// Markdown Conversion
 
 function convertToMarkdown(llmchatData) {
   const isCompressed = llmchatData.version === '2.0' && llmchatData.compression_manifest;

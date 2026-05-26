@@ -15,7 +15,8 @@
     "https://chatgpt.com/*",
     "https://chat.openai.com/*",
     "https://claude.ai/*",
-    "https://gemini.google.com/*"
+    "https://gemini.google.com/*",
+    "https://grok.com/*"
   ],
   "action": {
     "default_popup": "popup.html",
@@ -35,6 +36,17 @@
     {
       "matches": ["https://gemini.google.com/*"],
       "js": ["content-scripts/gemini.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://grok.com/*"],
+      "js": ["content-scripts/grok-fetch.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["https://grok.com/*"],
+      "js": ["content-scripts/grok.js"],
       "run_at": "document_idle"
     }
   ]
