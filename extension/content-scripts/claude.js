@@ -1,6 +1,6 @@
 // Claude content script - extracts conversation data
 
-chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
   if (request.action === 'export') {
     exportClaudeConversation()
       .then(data => sendResponse(data))
@@ -79,33 +79,73 @@ async function exportClaudeConversation() {
 async function exportSharedConversation(shareId) {
   console.log('[ContextPorter] Shared conversation ID:', shareId);
 
+  // Try API first using the viewer's org ID
+  const orgIdMatch = document.cookie.match(/lastActiveOrg=([a-f0-9-]+)/);
+  if (orgIdMatch) {
+    try {
+      const url = `https://claude.ai/api/organizations/${orgIdMatch[1]}/chat_snapshots/${shareId}?rendering_mode=messages&render_all_tools=true`;
+      const response = await fetch(url, {
+        method: 'GET',
+        credentials: 'include',
+        headers: { 'accept': 'application/json', 'anthropic-client-version': '1.0.0' },
+      });
+      if (response.ok) {
+        const rawData = await response.json();
+        const llmchatData = convertSnapshotToLLMChat(rawData, shareId);
+        return { success: true, platform: 'claude', conversationId: shareId, messageCount: llmchatData.messages.length, data: llmchatData };
+      }
+    } catch (_) {}
+  }
+
+  // Fallback: DOM scraping
   const messages = extractSharedMessagesFromDOM();
   if (messages.length === 0) {
     return { success: false, error: 'Could not extract messages from shared page' };
   }
 
-  // Try to get a title from the page
   const title = document.querySelector('h1, title')?.textContent?.trim() || 'Shared Conversation';
-
   const llmchatData = {
     version: "1.0",
     standard: "llmchat",
+    metadata: { title, source_platform: "claude.ai", source_model: "claude", conversation_id: shareId, total_messages: messages.length },
+    messages,
+  };
+  return { success: true, platform: 'claude', conversationId: shareId, messageCount: messages.length, data: llmchatData };
+}
+
+function convertSnapshotToLLMChat(snapshot, shareId) {
+  const messages = [];
+
+  for (const msg of (snapshot.chat_messages || [])) {
+    const textContent = (msg.content || [])
+      .filter(c => c.type === 'text')
+      .map(c => c.text)
+      .join('\n\n')
+      .trim();
+
+    if (!textContent) continue;
+
+    messages.push({
+      id: msg.uuid,
+      role: msg.sender === 'human' ? 'user' : 'assistant',
+      content: textContent,
+      timestamp: msg.created_at || null,
+      metadata: { index: msg.index, stop_reason: msg.stop_reason || null },
+    });
+  }
+
+  return {
+    version: "1.0",
+    standard: "llmchat",
     metadata: {
-      title,
+      title: snapshot.snapshot_name || 'Shared Conversation',
+      created: snapshot.created_at || null,
       source_platform: "claude.ai",
       source_model: "claude",
-      conversation_id: shareId,
+      conversation_id: snapshot.conversation_uuid || shareId,
       total_messages: messages.length,
     },
     messages,
-  };
-
-  return {
-    success: true,
-    platform: 'claude',
-    conversationId: shareId,
-    messageCount: messages.length,
-    data: llmchatData,
   };
 }
 
@@ -181,15 +221,15 @@ function extractTurnText(el, isHuman) {
   const clone = el.cloneNode(true);
 
   // Remove action buttons and UI chrome
-  clone.querySelectorAll('button, [role="button"], [aria-label], .copy-button, .action-bar').forEach(n => n.remove());
+  clone.querySelectorAll('button, [role="button"], .copy-button, .action-bar').forEach(n => n.remove());
 
   if (isHuman) {
-    return clone.innerText?.trim() || '';
+    return clone.innerText.trim();
   }
 
   // For assistant: prefer the prose/markdown container
   const prose = clone.querySelector('.prose, [class*="prose"], .markdown, [class*="markdown"]');
-  return (prose || clone).innerText?.trim() || '';
+  return (prose || clone).innerText.trim();
 }
 
 function convertClaudeToLLMChat(claudeJson) {
@@ -264,7 +304,7 @@ function convertClaudeToLLMChat(claudeJson) {
       created: claudeJson.created_at || null,
       updated: claudeJson.updated_at || null,
       source_platform: "claude.ai",
-      source_model: "claude-sonnet-4",
+      source_model: "claude",
       conversation_id: claudeJson.uuid,
       total_messages: messages.length,
     },
