@@ -8,13 +8,13 @@ When you hit context limits or want to switch between AI platforms, you lose you
 
 ## Solution
 
-Context Porter extracts conversations from ChatGPT and Claude, converts them to a universal `.llmchat` format, and allows seamless import to either platform.
+Context Porter extracts conversations from ChatGPT, Claude, Gemini et Grok converts them to a universal `.llmchat` format, and allows seamless import to either platform.
 
 ---
 
 ## Features
 
-- **One-click export** from ChatGPT and Claude
+- **One-click export** from ChatGPT, Claude, Gemini and Grok
 - **Universal format** (.llmchat) preserves full conversation history
 - **Cross-platform migration** - start on ChatGPT, continue on Claude (or vice versa)
 - **Preserves context** - messages, timestamps, attachments, code blocks
