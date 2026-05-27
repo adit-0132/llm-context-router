@@ -38,6 +38,7 @@ const statTime             = document.getElementById('statTime');
 
 const includeArtifactsCheckbox = document.getElementById('includeArtifacts');
 const artifactHint         = document.getElementById('artifactHint');
+const contextNameInput     = document.getElementById('contextName');
 
 // ── State ───────────────────────────────────────────────────────────
 
@@ -331,7 +332,8 @@ function processLlmchatText(text, baseName) {
   const markdown = convertToMarkdown(llmchatData);
   const blob = new Blob([markdown], { type: 'text/markdown' });
   const url = URL.createObjectURL(blob);
-  const filename = `context-porter/${baseName}.md`;
+  const finalName = getContextName() || suffixedTitle(llmchatData.metadata) || baseName;
+  const filename = `context-porter/${finalName}.md`;
 
   const a = document.createElement('a');
   a.href = url;
@@ -408,7 +410,10 @@ function showStatus(message, type) {
 function downloadFile(data, platform, conversationId) {
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
-  const filename = `context-porter/${platform}_${conversationId || Date.now()}.llmchat`;
+  const baseName = getContextName()
+    || suffixedTitle(data.metadata, platform)
+    || `${platform}_${conversationId || Date.now()}`;
+  const filename = `context-porter/${baseName}.llmchat`;
 
   const a = document.createElement('a');
   a.href = url;
@@ -418,6 +423,31 @@ function downloadFile(data, platform, conversationId) {
   document.body.removeChild(a);
 
   setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+// Returns sanitized name from the input, or null if empty.
+function getContextName() {
+  const raw = contextNameInput.value.trim();
+  if (!raw) return null;
+  return sanitizeName(raw);
+}
+
+// Strips filesystem-unsafe characters (/, \, :, *, ?, ", <, >, |) and collapses whitespace.
+function sanitizeName(raw) {
+  return raw.trim().replace(/[\\/:*?"<>|]+/g, '_').replace(/\s+/g, ' ').slice(0, 60);
+}
+
+// Default filename when no custom name is given: "<chat title>_<platform>".
+// Returns null if the chat has no usable title, so callers can fall back further.
+// platformOverride wins; otherwise the platform is derived from source_platform
+// (e.g. "claude.ai" → "claude").
+function suffixedTitle(metadata, platformOverride) {
+  const title = metadata?.title;
+  if (!title) return null;
+  const clean = sanitizeName(title);
+  if (!clean) return null;
+  const platform = platformOverride || (metadata.source_platform || '').split('.')[0];
+  return platform ? `${clean}_${platform}` : clean;
 }
 
 // Global clipboard sink — works for any .llmchat regardless of source platform.
