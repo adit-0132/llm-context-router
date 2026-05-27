@@ -1,6 +1,6 @@
-/* ── Context Porter — Popup Styles ────────────────────────────────── */
+/* Context Porter — Popup Styles */
 
-/* ── Reset & Foundation ──────────────────────────────────────────── */
+/* Reset & Foundation */
 *,
 *::before,
 *::after {
@@ -46,7 +46,7 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-/* ── Container ───────────────────────────────────────────────────── */
+/* Container */
 .container {
   padding: 16px;
   display: flex;
@@ -54,7 +54,7 @@ body {
   gap: 14px;
 }
 
-/* ── Header ──────────────────────────────────────────────────────── */
+/* Header */
 .header {
   display: flex;
   align-items: center;
@@ -84,7 +84,7 @@ body {
   font-weight: 500;
 }
 
-/* ── Info Bar ────────────────────────────────────────────────────── */
+/* Info Bar */
 .info-bar {
   display: flex;
   gap: 8px;
@@ -115,7 +115,7 @@ body {
   color: var(--text-primary);
 }
 
-/* ── Sections ────────────────────────────────────────────────────── */
+/* Sections */
 .section {
   background: var(--bg-secondary);
   border: 1px solid var(--border);
@@ -134,7 +134,7 @@ body {
   font-weight: 700;
 }
 
-/* ── Slider Group ────────────────────────────────────────────────── */
+/* Slider Group */
 .slider-group {
   display: flex;
   flex-direction: column;
@@ -164,7 +164,7 @@ body {
   text-align: center;
 }
 
-/* ── Range Slider ────────────────────────────────────────────────── */
+/* Range Slider */
 .quality-slider {
   -webkit-appearance: none;
   appearance: none;
@@ -212,7 +212,7 @@ body {
   color: var(--text-secondary);
 }
 
-/* ── Mode Toggle ─────────────────────────────────────────────────── */
+/* Mode Toggle */
 .mode-toggle {
   display: flex;
   gap: 4px;
@@ -254,7 +254,7 @@ body {
   font-size: 10px;
 }
 
-/* ── Checkbox Row ────────────────────────────────────────────────── */
+/* Checkbox Row */
 .checkbox-row {
   display: flex;
   align-items: center;
@@ -289,7 +289,7 @@ body {
   margin-left: auto;
 }
 
-/* ── Buttons ─────────────────────────────────────────────────────── */
+/* Buttons */
 .btn {
   display: flex;
   align-items: center;
@@ -342,7 +342,7 @@ body {
   opacity: 0.7;
 }
 
-/* ── Progress Bar ────────────────────────────────────────────────── */
+/* Progress Bar */
 .progress-container {
   display: flex;
   flex-direction: column;
@@ -374,7 +374,7 @@ body {
   color: var(--text-secondary);
 }
 
-/* ── Compression Stats ───────────────────────────────────────────── */
+/* Compression Stats */
 .stats-panel {
   background: var(--bg-primary);
   border-radius: var(--radius);
@@ -437,7 +437,7 @@ body {
   color: var(--text-muted);
 }
 
-/* ── Status Messages ─────────────────────────────────────────────── */
+/* Status Messages */
 .status {
   display: none;
   padding: 8px 12px;
@@ -467,14 +467,14 @@ body {
   border: 1px solid rgba(116, 185, 255, 0.2);
 }
 
-/* ── Hint Text ───────────────────────────────────────────────────── */
+/* Hint Text */
 .hint {
   font-size: 11px;
   color: var(--text-muted);
   text-align: center;
 }
 
-/* ── Animations ──────────────────────────────────────────────────── */
+/* Animations */
 @keyframes shimmer {
   0%   { background-position: -200% 0; }
   100% { background-position: 200% 0; }
