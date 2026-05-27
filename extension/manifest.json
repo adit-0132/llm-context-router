@@ -6,7 +6,9 @@
   "permissions": [
     "activeTab",
     "storage",
-    "webRequest"
+    "webRequest",
+    "clipboardRead",
+    "clipboardWrite"
   ],
   "background": {
     "service_worker": "background.js"

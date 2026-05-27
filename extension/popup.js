@@ -12,7 +12,9 @@
 // ── DOM References ──────────────────────────────────────────────────
 
 const exportBtn            = document.getElementById('exportBtn');
+const copyBtn              = document.getElementById('copyBtn');
 const importBtn            = document.getElementById('importBtn');
+const pasteBtn             = document.getElementById('pasteBtn');
 const fileInput            = document.getElementById('fileInput');
 const statusDiv            = document.getElementById('status');
 const platformSpan         = document.getElementById('platform');
@@ -64,6 +66,7 @@ chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
   } else {
     platformSpan.textContent = 'Unsupported';
     exportBtn.disabled = true;
+    copyBtn.disabled = true;
   }
 });
 
@@ -108,30 +111,35 @@ function setMode(mode) {
   }
 }
 
-// Export Button
+// Export Buttons
+// Both Download and Copy share the same extraction + compression pipeline.
+// They differ only in the final sink: file download vs. clipboard write.
 
-exportBtn.addEventListener('click', () => {
+exportBtn.addEventListener('click', () => runExport('download'));
+copyBtn.addEventListener('click',   () => runExport('clipboard'));
+
+function runExport(sink) {
   showStatus('Extracting conversation...', 'info');
-  exportBtn.disabled = true;
+  setBusy(true);
   hideStats();
 
   chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
     if (!tabs || !tabs[0]) {
       showStatus('No active tab found', 'error');
-      exportBtn.disabled = false;
+      setBusy(false);
       return;
     }
 
     chrome.tabs.sendMessage(tabs[0].id, { action: 'export' }, (response) => {
       if (chrome.runtime.lastError) {
         showStatus('Could not connect to page. Refresh and try again.', 'error');
-        exportBtn.disabled = false;
+        setBusy(false);
         return;
       }
 
       if (!response || !response.success) {
         showStatus('Error: ' + (response?.error || 'No response'), 'error');
-        exportBtn.disabled = false;
+        setBusy(false);
         return;
       }
 
@@ -141,29 +149,24 @@ exportBtn.addEventListener('click', () => {
       const includeArtifacts = includeArtifactsCheckbox.checked;
 
       if (currentMode === 'raw' || quality >= 100) {
-        // Raw export — no compression
         let exportData = response.data;
         if (!includeArtifacts) {
           exportData = stripArtifacts(exportData);
         }
-        downloadFile(exportData, response.platform, response.conversationId);
-        showStatus(`Exported ${response.messageCount} messages (raw)`, 'success');
-        exportBtn.disabled = false;
+        deliver(exportData, response.platform, response.conversationId, response.messageCount, sink, 'raw');
       } else {
-        // Smart compression via Web Worker
-        runCompression(response.data, quality, response.platform, response.conversationId, includeArtifacts);
+        runCompression(response.data, quality, response.platform, response.conversationId, includeArtifacts, sink);
       }
     });
   });
-});
+}
 
 // Compression via Web Worker
 
-function runCompression(llmchatData, quality, platform, conversationId, includeArtifacts) {
+function runCompression(llmchatData, quality, platform, conversationId, includeArtifacts, sink) {
   showProgress(true);
   updateProgress(0, 'Initializing compression...');
 
-  // Create a module worker (Chrome MV3 supports this)
   compressionWorker = new Worker(
     chrome.runtime.getURL('compression/compression-worker.js'),
     { type: 'module' }
@@ -179,13 +182,8 @@ function runCompression(llmchatData, quality, platform, conversationId, includeA
 
       case 'result':
         showProgress(false);
-        downloadFile(msg.data, platform, conversationId);
         showCompressionStats(msg.stats);
-        showStatus(
-          `Compressed: ${msg.stats.originalTokens} → ${msg.stats.compressedTokens} tokens`,
-          'success'
-        );
-        exportBtn.disabled = false;
+        deliver(msg.data, platform, conversationId, null, sink, 'compressed', msg.stats);
         compressionWorker.terminate();
         compressionWorker = null;
         break;
@@ -193,7 +191,7 @@ function runCompression(llmchatData, quality, platform, conversationId, includeA
       case 'error':
         showProgress(false);
         showStatus('Compression error: ' + msg.message, 'error');
-        exportBtn.disabled = false;
+        setBusy(false);
         compressionWorker.terminate();
         compressionWorker = null;
         break;
@@ -203,7 +201,7 @@ function runCompression(llmchatData, quality, platform, conversationId, includeA
   compressionWorker.onerror = (err) => {
     showProgress(false);
     showStatus('Worker error: ' + err.message, 'error');
-    exportBtn.disabled = false;
+    setBusy(false);
     compressionWorker = null;
   };
 
@@ -213,6 +211,33 @@ function runCompression(llmchatData, quality, platform, conversationId, includeA
     quality: quality,
     includeArtifacts: includeArtifacts,
   });
+}
+
+// Output sink — download or copy. Platform-agnostic: operates on .llmchat JSON.
+async function deliver(data, platform, conversationId, messageCount, sink, kind, stats) {
+  if (sink === 'clipboard') {
+    try {
+      await copyToClipboard(data);
+      const label = kind === 'compressed'
+        ? `Copied compressed chat (${stats.originalTokens} → ${stats.compressedTokens} tokens)`
+        : `Copied ${messageCount} messages to clipboard`;
+      showStatus(label, 'success');
+    } catch (err) {
+      showStatus('Clipboard copy failed: ' + err.message, 'error');
+    }
+  } else {
+    downloadFile(data, platform, conversationId);
+    const label = kind === 'compressed'
+      ? `Compressed: ${stats.originalTokens} → ${stats.compressedTokens} tokens`
+      : `Exported ${messageCount} messages (raw)`;
+    showStatus(label, 'success');
+  }
+  setBusy(false);
+}
+
+function setBusy(busy) {
+  exportBtn.disabled = busy;
+  copyBtn.disabled   = busy;
 }
 
 // Progress UI 
@@ -261,41 +286,64 @@ fileInput.addEventListener('change', async (e) => {
   const file = e.target.files[0];
   if (!file) return;
 
-  showStatus('Converting...', 'info');
-
   try {
     const text = await file.text();
-    const llmchatData = JSON.parse(text);
-
-    if (llmchatData.standard !== 'llmchat') {
-      showStatus('Not a valid .llmchat file', 'error');
-      fileInput.value = '';
-      return;
-    }
-
-    const markdown = convertToMarkdown(llmchatData);
-
-    const blob = new Blob([markdown], { type: 'text/markdown' });
-    const url = URL.createObjectURL(blob);
-    const filename = `context-porter/${file.name.replace('.llmchat', '.md')}`;
-
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-
-    showStatus(`Converted ${llmchatData.messages.length} messages to markdown`, 'success');
-
+    const baseName = file.name.replace(/\.llmchat$/, '');
+    processLlmchatText(text, baseName);
   } catch (error) {
-    showStatus('Failed to parse file: ' + error.message, 'error');
+    showStatus('Failed to read file: ' + error.message, 'error');
   }
 
   fileInput.value = '';
 });
+
+pasteBtn.addEventListener('click', async () => {
+  showStatus('Reading clipboard...', 'info');
+  try {
+    const text = await navigator.clipboard.readText();
+    if (!text) {
+      showStatus('Clipboard is empty', 'error');
+      return;
+    }
+    processLlmchatText(text, `pasted_${Date.now()}`);
+  } catch (err) {
+    showStatus('Clipboard read failed: ' + err.message, 'error');
+  }
+});
+
+// Shared path for file-upload and paste-from-clipboard imports.
+function processLlmchatText(text, baseName) {
+  showStatus('Converting...', 'info');
+
+  let llmchatData;
+  try {
+    llmchatData = JSON.parse(text);
+  } catch (err) {
+    showStatus('Not valid JSON: ' + err.message, 'error');
+    return;
+  }
+
+  if (llmchatData.standard !== 'llmchat') {
+    showStatus('Not a valid .llmchat payload', 'error');
+    return;
+  }
+
+  const markdown = convertToMarkdown(llmchatData);
+  const blob = new Blob([markdown], { type: 'text/markdown' });
+  const url = URL.createObjectURL(blob);
+  const filename = `context-porter/${baseName}.md`;
+
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+
+  showStatus(`Converted ${llmchatData.messages.length} messages to markdown`, 'success');
+}
 
 // Markdown Conversion
 
@@ -370,6 +418,13 @@ function downloadFile(data, platform, conversationId) {
   document.body.removeChild(a);
 
   setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+// Global clipboard sink — works for any .llmchat regardless of source platform.
+// Uses navigator.clipboard.writeText (async, requires extension popup focus, which we have).
+async function copyToClipboard(data) {
+  const json = JSON.stringify(data, null, 2);
+  await navigator.clipboard.writeText(json);
 }
 
 /**

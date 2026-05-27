@@ -342,6 +342,32 @@ body {
   opacity: 0.7;
 }
 
+/* Row of buttons (Export + Copy) */
+.btn-row {
+  display: flex;
+  gap: 6px;
+}
+
+.btn-row .btn {
+  padding: 7px 14px;
+}
+
+.btn-row .btn:not(.btn-icon-only) {
+  flex: 1;
+}
+
+/* Compact icon-only button */
+.btn-icon-only {
+  width: 36px;
+  flex-shrink: 0;
+  padding: 7px 0;
+}
+
+.btn-icon-only .btn-icon {
+  font-size: 15px;
+  opacity: 0.95;
+}
+
 /* Progress Bar */
 .progress-container {
   display: flex;
