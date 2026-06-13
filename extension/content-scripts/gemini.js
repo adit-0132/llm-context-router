@@ -1,8 +1,22 @@
 // Gemini content script - extracts conversation data
 
+// Bridge: allow triggering export_all from page context (for testing & automation)
+window.addEventListener('message', async (event) => {
+  if (event.data?.type !== 'context-porter-export-all') return;
+  console.log('[ContextPorter] Export All triggered via postMessage');
+  const result = await exportAllGeminiConversations();
+  window.postMessage({ type: 'context-porter-export-all-result', result }, '*');
+});
+
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === 'export') {
     exportGeminiConversation()
+      .then(data => sendResponse(data))
+      .catch(err => sendResponse({ success: false, error: err.message }));
+    return true;
+  }
+  if (request.action === 'export_all') {
+    exportAllGeminiConversations()
       .then(data => sendResponse(data))
       .catch(err => sendResponse({ success: false, error: err.message }));
     return true;
@@ -60,6 +74,56 @@ async function exportGeminiConversation() {
     console.error('[ContextPorter] Error:', error);
     return { success: false, error: error.message };
   }
+}
+
+async function exportAllGeminiConversations() {
+  try {
+    // Scrape sidebar for all conversation links
+    const conversations = scrapeConversationList();
+    console.log('[ContextPorter] Export All — found', conversations.length, 'conversations in sidebar');
+
+    if (conversations.length === 0) {
+      return { success: false, error: 'No conversations found in sidebar. Open the sidebar and try again.' };
+    }
+
+    // Gemini is a pure SPA — no API to fetch conversation data directly.
+    // Return the conversation list so popup.js can navigate to each one
+    // sequentially and collect exports via the single-chat `export` action.
+    return {
+      success: true,
+      platform: 'gemini',
+      needsSequentialExport: true,
+      baseUrl: 'https://gemini.google.com/app',
+      totalFound: conversations.length,
+      conversations
+    };
+  } catch (error) {
+    console.error('[ContextPorter] Export All error:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+function scrapeConversationList() {
+  // Match only sidebar conversation links (relative paths starting with /app/)
+  // Exclude external links (e.g. Google account URLs that happen to contain /app/)
+  const links = document.querySelectorAll('a[href^="/app/"]');
+  const seen = new Set();
+  const conversations = [];
+
+  for (const link of links) {
+    const href = link.getAttribute('href') || '';
+    const match = href.match(/\/app\/([a-zA-Z0-9_-]+)/);
+    if (!match) continue;
+
+    const id = match[1];
+    if (seen.has(id)) continue;
+    seen.add(id);
+
+    const title = link.textContent.trim() || 'Untitled';
+    conversations.push({ id, title });
+  }
+
+  return conversations;
 }
 
 function extractMessagesFromDOM() {

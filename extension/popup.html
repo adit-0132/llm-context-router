@@ -11,7 +11,7 @@
         <span class="logo-icon">◈</span>
         Context Porter
       </h1>
-      <span class="version">v2.0</span>
+      <span class="version">v1</span>
     </header>
 
     <div id="status" class="status"></div>
@@ -23,8 +23,8 @@
         <span id="platform" class="info-value">Detecting...</span>
       </div>
       <div class="info-chip">
-        <span class="info-label">Messages</span>
-        <span id="messageCount" class="info-value">—</span>
+        <span class="info-label">Progress</span>
+        <span id="exportProgress" class="info-value">—</span>
       </div>
     </div>
 
@@ -79,14 +79,11 @@
       <label class="checkbox-row" id="artifactToggle">
         <input type="checkbox" id="includeArtifacts" checked>
         <span class="checkbox-label">Include file attachments</span>
-        <span class="checkbox-hint" id="artifactHint"></span>
       </label>
 
       <div class="btn-row">
-        <button id="exportBtn" class="btn btn-primary">
-          <span class="btn-text">Export Chat</span>
-          <span class="btn-icon">↓</span>
-        </button>
+        <button id="exportBtn" class="btn btn-primary"><span class="btn-text">Export Chat</span><span class="btn-icon">↓</span></button>
+        <button id="exportAllBtn" class="btn btn-primary"><span class="btn-text">Export All Chats</span><span class="btn-icon">⬇︎</span></button>
         <button id="copyBtn" class="btn btn-primary btn-icon-only" title="Copy to clipboard">
           <span class="btn-icon">⎘</span>
         </button>
@@ -141,6 +138,7 @@
     </div>
   </div>
 
+  <script src="lib/jszip.min.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

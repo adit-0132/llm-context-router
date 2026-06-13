@@ -1,10 +1,11 @@
 {
   "manifest_version": 3,
   "name": "Context Porter",
-  "version": "0.1.0",
-  "description": "Export and import LLM conversations between ChatGPT and Claude",
+  "version": "1.0.0",
+  "description": "Export and import LLM conversations across ChatGPT, Claude, Gemini, and Grok",
   "permissions": [
     "activeTab",
+    "tabs",
     "storage",
     "webRequest",
     "clipboardRead",

@@ -1,11 +1,31 @@
 // Claude content script - extracts conversation data
 
+// Bridge: allow triggering export_all from page context (for testing & automation)
+window.addEventListener('message', async (event) => {
+  if (event.data?.type !== 'context-porter-export-all') return;
+  console.log('[ContextPorter] Export All triggered via postMessage');
+  const result = await exportAllClaudeConversations();
+  window.postMessage({ type: 'context-porter-export-all-result', result }, '*');
+});
+
 chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
   if (request.action === 'export') {
     exportClaudeConversation()
       .then(data => sendResponse(data))
       .catch(err => sendResponse({ success: false, error: err.message }));
-    return true; // Keep message channel open
+    return true;
+  }
+  if (request.action === 'export_all') {
+    chrome.storage.session.set({ exportProgress: { active: true, platform: 'claude', current: 0, total: 0 } });
+    sendResponse({ started: true });
+    exportAllClaudeConversations().then(result => {
+      chrome.storage.local.set({ exportAllResult: result }, () => {
+        chrome.storage.session.set({ exportProgress: { active: false, complete: true, platform: 'claude' } });
+      });
+    }).catch(err => {
+      chrome.storage.session.set({ exportProgress: { active: false, error: err.message } });
+    });
+    return false;
   }
 });
 
@@ -230,6 +250,84 @@ function extractTurnText(el, isHuman) {
   // For assistant: prefer the prose/markdown container
   const prose = clone.querySelector('.prose, [class*="prose"], .markdown, [class*="markdown"]');
   return (prose || clone).innerText.trim();
+}
+
+async function exportAllClaudeConversations() {
+  try {
+    const orgIdMatch = document.cookie.match(/lastActiveOrg=([a-f0-9-]+)/);
+    if (!orgIdMatch) {
+      return { success: false, error: 'Could not find org ID in cookies' };
+    }
+    const orgId = orgIdMatch[1];
+    console.log('[ContextPorter] Export All — org:', orgId);
+
+    const allConversations = [];
+    let offset = 0;
+    const limit = 30;
+
+    while (true) {
+      const listUrl = `https://claude.ai/api/organizations/${orgId}/chat_conversations_v2?limit=${limit}&offset=${offset}&consistency=eventual`;
+      const listRes = await fetch(listUrl, {
+        credentials: 'include',
+        headers: { 'accept': 'application/json', 'anthropic-client-version': '1.0.0' }
+      });
+
+      if (!listRes.ok) {
+        return { success: false, error: `Failed to list conversations: ${listRes.status}` };
+      }
+
+      const page = await listRes.json();
+      const items = Array.isArray(page) ? page : (page.data || []);
+      if (items.length === 0) break;
+      allConversations.push(...items);
+      if (items.length < limit) break;
+      offset += limit;
+    }
+
+    console.log('[ContextPorter] Found', allConversations.length, 'conversations');
+
+    if (allConversations.length === 0) {
+      return { success: false, error: 'No conversations found' };
+    }
+
+    const results = [];
+    for (let i = 0; i < allConversations.length; i++) {
+      const conv = allConversations[i];
+      chrome.storage.session.set({ exportProgress: { active: true, platform: 'claude', current: i, total: allConversations.length } });
+      try {
+        const apiUrl = `https://claude.ai/api/organizations/${orgId}/chat_conversations/${conv.uuid}?tree=True&rendering_mode=messages&render_all_tools=true&consistency=strong`;
+        const resp = await fetch(apiUrl, {
+          credentials: 'include',
+          headers: { 'accept': 'application/json', 'anthropic-client-version': '1.0.0', 'content-type': 'application/json' }
+        });
+
+        if (!resp.ok) {
+          console.warn('[ContextPorter] Skip', conv.uuid, resp.status);
+          continue;
+        }
+
+        const raw = await resp.json();
+        const llmchat = convertClaudeToLLMChat(raw);
+        const title = (llmchat.metadata.title || 'Untitled')
+          .replace(/[\\/:*?"<>|]+/g, '_').replace(/\s+/g, ' ').trim().slice(0, 60);
+
+        results.push({ filename: `${title}_claude.llmchat`, data: llmchat });
+      } catch (err) {
+        console.warn('[ContextPorter] Error fetching', conv.uuid, err.message);
+      }
+    }
+
+    return {
+      success: true,
+      platform: 'claude',
+      totalFound: allConversations.length,
+      exported: results.length,
+      conversations: results
+    };
+  } catch (error) {
+    console.error('[ContextPorter] Export All error:', error);
+    return { success: false, error: error.message };
+  }
 }
 
 function convertClaudeToLLMChat(claudeJson) {

@@ -12,13 +12,14 @@
 // ── DOM References ──────────────────────────────────────────────────
 
 const exportBtn            = document.getElementById('exportBtn');
+const exportAllBtn         = document.getElementById('exportAllBtn');
 const copyBtn              = document.getElementById('copyBtn');
 const importBtn            = document.getElementById('importBtn');
 const pasteBtn             = document.getElementById('pasteBtn');
 const fileInput            = document.getElementById('fileInput');
 const statusDiv            = document.getElementById('status');
 const platformSpan         = document.getElementById('platform');
-const messageCountSpan     = document.getElementById('messageCount');
+const exportProgressSpan   = document.getElementById('exportProgress');
 
 const qualitySlider        = document.getElementById('qualitySlider');
 const qualityValue         = document.getElementById('qualityValue');
@@ -37,13 +38,14 @@ const statSegments         = document.getElementById('statSegments');
 const statTime             = document.getElementById('statTime');
 
 const includeArtifactsCheckbox = document.getElementById('includeArtifacts');
-const artifactHint         = document.getElementById('artifactHint');
 const contextNameInput     = document.getElementById('contextName');
 
 // ── State ───────────────────────────────────────────────────────────
 
 let currentMode = 'smart'; // 'smart' | 'raw'
 let compressionWorker = null;
+let progressInterval = null;
+let exportTabId = null;
 
 // ── Platform Detection ──────────────────────────────────────────────
 
@@ -71,7 +73,30 @@ chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
   }
 });
 
-// Quality Slider 
+// ── Resume active export on popup reopen ────────────────────────────
+chrome.storage.session.get('exportProgress', (data) => {
+  const p = data.exportProgress;
+  if (!p) return;
+
+  if (p.active) {
+    setBusy(true);
+    showStatus(`Export in progress (${p.platform})…`, 'info');
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      if (tabs[0]) startProgressPolling(tabs[0].id);
+    });
+  } else if (p.complete) {
+    setBusy(true);
+    showStatus('Export complete, packaging…', 'info');
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      if (tabs[0]) retrieveAndDownload(tabs[0].id, p.platform);
+    });
+  } else if (p.error) {
+    showStatus('Export failed: ' + p.error, 'error');
+    chrome.storage.session.remove('exportProgress');
+  }
+});
+
+// Quality Slider
 
 qualitySlider.addEventListener('input', () => {
   const val = parseInt(qualitySlider.value, 10);
@@ -119,6 +144,255 @@ function setMode(mode) {
 exportBtn.addEventListener('click', () => runExport('download'));
 copyBtn.addEventListener('click',   () => runExport('clipboard'));
 
+// Export all chats (ZIP)
+if (exportAllBtn) {
+  exportAllBtn.addEventListener('click', () => {
+    showStatus('Fetching all conversations…', 'info');
+    setBusy(true);
+    exportProgressSpan.textContent = '0%';
+
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      if (!tabs || !tabs[0]) {
+        showStatus('No active tab found', 'error');
+        setBusy(false);
+        exportProgressSpan.textContent = '—';
+        return;
+      }
+
+      const tabId = tabs[0].id;
+
+      chrome.tabs.sendMessage(tabId, { action: 'export_all' }, async (response) => {
+        if (chrome.runtime.lastError) {
+          showStatus('Could not connect to page. Refresh and try again.', 'error');
+          setBusy(false);
+          exportProgressSpan.textContent = '—';
+          return;
+        }
+
+        if (!response) {
+          showStatus('No response from content script', 'error');
+          setBusy(false);
+          exportProgressSpan.textContent = '—';
+          return;
+        }
+
+        // Content script is handling it async (Claude/ChatGPT)
+        if (response.started) {
+          startProgressPolling(tabId);
+          return;
+        }
+
+        // Gemini: needs sequential navigation from popup
+        if (response.needsSequentialExport) {
+          await handleSequentialExport(tabId, response);
+          return;
+        }
+
+        // Shouldn't reach here, but handle legacy direct-result format
+        if (response.success) {
+          await packAndDownloadZip(response);
+        } else {
+          showStatus('Error: ' + (response.error || 'Unknown'), 'error');
+          setBusy(false);
+          exportProgressSpan.textContent = '—';
+        }
+      });
+    });
+  });
+}
+
+async function handleSequentialExport(tabId, listResponse) {
+  const convList = listResponse.conversations;
+  const platform = listResponse.platform || 'chats';
+  const baseUrl = listResponse.baseUrl || 'https://gemini.google.com/app';
+  const results = [];
+  const originalUrl = await getTabUrl(tabId);
+
+  for (let i = 0; i < convList.length; i++) {
+    const conv = convList[i];
+    const pct = Math.round(((i) / convList.length) * 100);
+    exportProgressSpan.textContent = `${pct}%`;
+    chrome.storage.session.set({ exportProgress: { active: true, platform, current: i, total: convList.length } });
+    showStatus(`Exporting ${i + 1}/${convList.length}: ${conv.title.slice(0, 30)}…`, 'info');
+
+    try {
+      // Navigate tab to this conversation
+      const convUrl = `${baseUrl}/${conv.id}`;
+      await navigateAndWait(tabId, convUrl);
+
+      // Poll until the content script reports messages (SPA render time varies)
+      const exportResult = await pollForExport(tabId, 15);
+
+      if (exportResult && exportResult.success) {
+        const safeName = (exportResult.data?.metadata?.title || conv.title || 'Untitled')
+          .replace(/[\\/:*?"<>|]+/g, '_').replace(/\s+/g, ' ').trim().slice(0, 60);
+        results.push({ filename: `${safeName}_${platform}.llmchat`, data: exportResult.data });
+      }
+    } catch (err) {
+      console.warn('[ContextPorter] Error exporting', conv.id, err.message);
+    }
+  }
+
+  // Navigate back to original URL
+  if (originalUrl) {
+    try { await navigateAndWait(tabId, originalUrl); } catch (_) {}
+  }
+
+  if (results.length === 0) {
+    showStatus('No conversations could be exported', 'error');
+    setBusy(false);
+    return;
+  }
+
+  await packAndDownloadZip({
+    platform,
+    totalFound: convList.length,
+    exported: results.length,
+    conversations: results
+  });
+}
+
+async function packAndDownloadZip(response) {
+  try {
+    showStatus(`Packing ${response.exported || response.conversations.length} conversations into ZIP…`, 'info');
+
+    if (typeof JSZip === 'undefined') {
+      throw new Error('JSZip library not loaded');
+    }
+
+    const zip = new JSZip();
+    for (const conv of response.conversations) {
+      zip.file(conv.filename, JSON.stringify(conv.data, null, 2));
+    }
+
+    const blob = await zip.generateAsync({ type: 'blob' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const platform = response.platform || 'chats';
+    a.download = (getContextName() || `${platform}_chats`) + '.zip';
+    a.click();
+    URL.revokeObjectURL(url);
+
+    showStatus(`Exported ${response.exported || response.conversations.length}/${response.totalFound || response.conversations.length} conversations`, 'success');
+  } catch (err) {
+    showStatus('ZIP creation failed: ' + err.message, 'error');
+  } finally {
+    exportProgressSpan.textContent = '—';
+    chrome.storage.session.remove('exportProgress');
+    setBusy(false);
+  }
+}
+
+function startProgressPolling(tabId) {
+  exportTabId = tabId;
+  if (progressInterval) clearInterval(progressInterval);
+  progressInterval = setInterval(async () => {
+    const data = await chrome.storage.session.get('exportProgress');
+    const p = data.exportProgress;
+    if (!p) return;
+
+    if (p.active) {
+      const pct = p.total > 0 ? Math.round((p.current / p.total) * 100) : 0;
+      exportProgressSpan.textContent = `${pct}%`;
+      if (p.total > 0) showStatus(`Exporting ${p.current}/${p.total} (${p.platform})…`, 'info');
+    } else if (p.complete) {
+      clearInterval(progressInterval);
+      progressInterval = null;
+      exportProgressSpan.textContent = '100%';
+      await retrieveAndDownload(exportTabId || tabId, p.platform);
+    } else if (p.error) {
+      clearInterval(progressInterval);
+      progressInterval = null;
+      showStatus('Export failed: ' + p.error, 'error');
+      exportProgressSpan.textContent = '—';
+      chrome.storage.session.remove('exportProgress');
+      setBusy(false);
+    }
+  }, 500);
+}
+
+async function retrieveAndDownload(tabId, platform) {
+  showStatus('Packaging ZIP…', 'info');
+  try {
+    const data = await chrome.storage.local.get('exportAllResult');
+    const result = data.exportAllResult;
+    if (result && result.success) {
+      await packAndDownloadZip(result);
+      chrome.storage.local.remove('exportAllResult');
+    } else {
+      showStatus('Export finished but result was empty. Try again.', 'error');
+      exportProgressSpan.textContent = '—';
+      chrome.storage.session.remove('exportProgress');
+      chrome.storage.local.remove('exportAllResult');
+      setBusy(false);
+    }
+  } catch (err) {
+    showStatus('Failed to package ZIP: ' + err.message, 'error');
+    exportProgressSpan.textContent = '—';
+    chrome.storage.session.remove('exportProgress');
+    chrome.storage.local.remove('exportAllResult');
+    setBusy(false);
+  }
+}
+
+function getTabUrl(tabId) {
+  return new Promise((resolve) => {
+    chrome.tabs.get(tabId, (tab) => resolve(tab?.url || null));
+  });
+}
+
+function navigateAndWait(tabId, url) {
+  return new Promise((resolve, reject) => {
+    chrome.tabs.update(tabId, { url }, () => {
+      if (chrome.runtime.lastError) {
+        reject(new Error(chrome.runtime.lastError.message));
+        return;
+      }
+
+      const onUpdated = (updatedTabId, changeInfo) => {
+        if (updatedTabId === tabId && changeInfo.status === 'complete') {
+          chrome.tabs.onUpdated.removeListener(onUpdated);
+          resolve();
+        }
+      };
+      chrome.tabs.onUpdated.addListener(onUpdated);
+
+      // Safety timeout: 30s
+      setTimeout(() => {
+        chrome.tabs.onUpdated.removeListener(onUpdated);
+        resolve(); // resolve anyway to continue with next conversation
+      }, 30000);
+    });
+  });
+}
+
+// Poll the tab for a successful export, retrying as the SPA renders.
+async function pollForExport(tabId, maxAttempts) {
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    await sleep(1000);
+    const result = await sendMessageToTab(tabId, { action: 'export' });
+    if (result && result.success) return result;
+  }
+  return null;
+}
+
+function sendMessageToTab(tabId, message) {
+  return new Promise((resolve) => {
+    chrome.tabs.sendMessage(tabId, message, (response) => {
+      if (chrome.runtime.lastError) {
+        resolve(null);
+        return;
+      }
+      resolve(response);
+    });
+  });
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 function runExport(sink) {
   showStatus('Extracting conversation...', 'info');
   setBusy(true);
@@ -143,8 +417,6 @@ function runExport(sink) {
         setBusy(false);
         return;
       }
-
-      messageCountSpan.textContent = `${response.messageCount}`;
 
       const quality = parseInt(qualitySlider.value, 10);
       const includeArtifacts = includeArtifactsCheckbox.checked;

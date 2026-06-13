@@ -10,8 +10,8 @@ A Chrome extension that exports LLM conversations from ChatGPT, Claude, Gemini, 
 
 | Platform | URL | Extraction Method |
 |----------|-----|-------------------|
-| ChatGPT | `chatgpt.com`, `chat.openai.com` | Internal REST API (`/backend-api/conversation/:id`) with auth token intercepted by background worker |
-| Claude | `claude.ai` | Internal REST API (`/api/organizations/:orgId/chat_conversations/:id`) via session cookie |
+| ChatGPT | `chatgpt.com`, `chat.Claude.com` | Internal REST API (`/backend-api/conversation/:id`) with auth token intercepted by background worker |
+| Claude | `claude.ai` | Internal REST API (`/api/organizations/:orgId/chat_conversations/:id`) via session cookie; **shared chats** (`/share/:id`) supported via DOM scraping |
 | Gemini | `gemini.google.com` | DOM scraping — 3 fallback strategies (custom elements → role attributes → sibling pairs) with HTML→markdown conversion |
 | Grok | `grok.com` | Internal REST API (`/rest/app-chat/conversations/:id/load-responses`) — fetch intercepted in MAIN world to bypass CSP and origin restrictions |
 
@@ -22,11 +22,11 @@ A Chrome extension that exports LLM conversations from ChatGPT, Claude, Gemini, 
 ```
 extension/
 ├── manifest.json                    # MV3, host permissions for all 4 platforms
-├── popup.html / popup.css / popup.js # UI: export controls, compression slider, import
+├── popup.html / popup.css / popup.js # UI: export controls, compression slider, import, Export All button
 ├── background.js                    # Service worker: intercepts ChatGPT auth token
 ├── content-scripts/
 │   ├── chatgpt.js                   # ChatGPT extractor + llmchat converter
-│   ├── claude.js                    # Claude extractor + llmchat converter
+│   ├── claude.js                    # Claude extractor + llmchat converter (supports shared chats)
 │   ├── gemini.js                    # Gemini DOM scraper + HTML→markdown converter
 │   ├── grok.js                      # Grok extractor (isolated world) + llmchat converter
 │   └── grok-fetch.js                # Grok fetch interceptor (MAIN world) — bridges origin restriction
@@ -53,7 +53,7 @@ extension/
   "standard": "llmchat",
   "metadata": {
     "title": "...",
-    "source_platform": "claude.ai | chatgpt.com | gemini.google.com",
+    "source_platform": "claude.ai | chatgpt.com | gemini.google.com | grok.com",
     "source_model": "...",
     "conversation_id": "...",
     "total_messages": 42
@@ -95,8 +95,6 @@ Raw .llmchat
     ↓
 [composer.js]    Reassemble → .llmchat v2.0 with compression manifest
 ```
-
----
 
 ### Stage 1 — Structural Segmentation (`segmenter.js`)
 
@@ -216,7 +214,7 @@ Fill remaining token budget from the leftover pool:
 
 ---
 
-### Configuration (`config.js`)
+## Configuration (`config.js`)
 
 All parameters are tunable and exposed as a frozen `DEFAULT_CONFIG` object:
 
@@ -298,6 +296,8 @@ Since Gemini's internal API requires complex auth not accessible from a content 
 | Include Artifacts checkbox | Strips attached document content from export when unchecked |
 | Progress bar | Streamed from Web Worker via `postMessage` (`progress` events) |
 | Compression stats panel | Original tokens → compressed tokens, ratio, segments kept, elapsed ms, superseded/meta counts |
+| **Export All Claude Chats button** | Fetches the user's recent chats from `claude.ai/recents`, exports each as `.llmchat`, and packages them into a ZIP file (optional custom name via context name input) |
+| Context name input | Optional text field to set a base name for exported files (used for single export and as ZIP name for Export All) |
 
 ---
 
@@ -320,3 +320,21 @@ Full pipeline at 40%:
 ```
 
 All 49 unit tests pass (segmenter, tfidf, graph, ranker, composer) against real conversation fixtures.
+
+---
+
+## Export All Claude Chats Feature
+
+Added in popup.html/button and popup.js logic:
+- When on any Claude tab (`claude.ai`), the extension shows an **Export All Claude Chats** button in the popup.
+- Clicking it:
+  1. Loads `https://claude.ai/recents` (requires authentication via cookies).
+  2. Parses the HTML to extract all conversation IDs (both `/chat/` and `/share/` links).
+  3. For each ID, calls the Claude API (`/api/organizations/:orgId/chat_conversations/:id`) to fetch the full conversation.
+  4. Converts each response to `.llmchat` v1.0 using the existing `convertClaudeToLLMChat` function.
+  5. Names each file using the conversation title (sanitized) suffixed with `_claude.llmchat`; if a custom context name is provided via the input field, that name is used as the base for the ZIP file.
+  6. Packs all `.llmchat` files into a ZIP archive using `JSZip` and triggers a download.
+- Status updates are shown in the popup during the process.
+- Errors (e.g., missing auth, network issues) are caught and displayed.
+
+This feature enables a one‑click export of a user's entire Claude chat history for backup or migration.

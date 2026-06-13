@@ -1,5 +1,13 @@
 // ChatGPT content script - extracts conversation data
 
+// Bridge: allow triggering export_all from page context (for testing & automation)
+window.addEventListener('message', async (event) => {
+  if (event.data?.type !== 'context-porter-export-all') return;
+  console.log('[ContextPorter] Export All triggered via postMessage');
+  const result = await exportAllChatGPTConversations();
+  window.postMessage({ type: 'context-porter-export-all-result', result }, '*');
+});
+
 // Listen for export requests
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === 'export') {
@@ -7,6 +15,18 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       .then(data => sendResponse(data))
       .catch(err => sendResponse({ success: false, error: err.message }));
     return true;
+  }
+  if (request.action === 'export_all') {
+    chrome.storage.session.set({ exportProgress: { active: true, platform: 'chatgpt', current: 0, total: 0 } });
+    sendResponse({ started: true });
+    exportAllChatGPTConversations().then(result => {
+      chrome.storage.local.set({ exportAllResult: result }, () => {
+        chrome.storage.session.set({ exportProgress: { active: false, complete: true, platform: 'chatgpt' } });
+      });
+    }).catch(err => {
+      chrome.storage.session.set({ exportProgress: { active: false, error: err.message } });
+    });
+    return false;
   }
 });
 
@@ -73,9 +93,97 @@ async function exportChatGPTConversation() {
   }
 }
 
-function convertChatGPTToLLMChat(chatgptJson) {
-  const messages = [];
+async function exportAllChatGPTConversations() {
+  try {
+    const authToken = await new Promise((resolve) => {
+      chrome.runtime.sendMessage({ action: 'getChatGPTAuth' }, (response) => {
+        resolve(response?.token || null);
+      });
+    });
 
+    if (!authToken) {
+      return { success: false, error: 'Auth token not found. Refresh the page first.' };
+    }
+
+    console.log('[ContextPorter] Export All — fetching conversation list');
+
+    const allConversations = [];
+    let offset = 0;
+    const limit = 28;
+
+    while (true) {
+      const listUrl = `https://chatgpt.com/backend-api/conversations?offset=${offset}&limit=${limit}&order=updated`;
+      const listRes = await fetch(listUrl, {
+        credentials: 'include',
+        headers: {
+          'accept': 'application/json',
+          'authorization': authToken,
+        }
+      });
+
+      if (!listRes.ok) {
+        return { success: false, error: `Failed to list conversations: ${listRes.status}` };
+      }
+
+      const page = await listRes.json();
+      const items = page.items || [];
+      if (items.length === 0) break;
+      allConversations.push(...items);
+      if (items.length < limit) break;
+      offset += limit;
+    }
+
+    console.log('[ContextPorter] Found', allConversations.length, 'conversations');
+
+    if (allConversations.length === 0) {
+      return { success: false, error: 'No conversations found' };
+    }
+
+    const results = [];
+    for (let i = 0; i < allConversations.length; i++) {
+      const conv = allConversations[i];
+      chrome.storage.session.set({ exportProgress: { active: true, platform: 'chatgpt', current: i, total: allConversations.length } });
+      try {
+        const resp = await fetch(`https://chatgpt.com/backend-api/conversation/${conv.id}`, {
+          credentials: 'include',
+          headers: {
+            'accept': 'application/json',
+            'authorization': authToken,
+          }
+        });
+
+        if (!resp.ok) {
+          console.warn('[ContextPorter] Skip', conv.id, resp.status);
+          continue;
+        }
+
+        const raw = await resp.json();
+        const llmchat = convertChatGPTToLLMChat(raw);
+        const title = (llmchat.metadata.title || 'Untitled')
+          .replace(/[\\/:*?"<>|]+/g, '_').replace(/\s+/g, ' ').trim().slice(0, 60);
+
+        results.push({ filename: `${title}_chatgpt.llmchat`, data: llmchat });
+      } catch (err) {
+        console.warn('[ContextPorter] Error fetching', conv.id, err.message);
+      }
+    }
+
+    console.log('[ContextPorter] Exported', results.length, 'of', allConversations.length);
+
+    return {
+      success: true,
+      platform: 'chatgpt',
+      totalFound: allConversations.length,
+      exported: results.length,
+      conversations: results
+    };
+  } catch (error) {
+    console.error('[ContextPorter] Export All error:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+function convertChatGPTToLLMChat(chatgptJson) {
   function traverseToRoot(nodeId, collected = []) {
     if (!nodeId || nodeId === 'client-created-root') return collected;
 

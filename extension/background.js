@@ -28,4 +28,6 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 });
 
+chrome.storage.session.setAccessLevel({ accessLevel: 'TRUSTED_AND_UNTRUSTED_CONTEXTS' });
+
 console.log('[ContextPorter Background] Service worker started');
