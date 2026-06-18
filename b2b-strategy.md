@@ -6,7 +6,7 @@ of the stored corpus.
 
 Claims are tagged `[Certain]`, `[Likely]`, or `[Guessing]`.
 
----
+--
 
 ## 1. Framing Correction: Storage Is Not the Value
 
